@@ -4,6 +4,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { GRID_RULES } from "@/lib/rules";
+import { PROVIDERS } from "@/lib/provider-meta";
+import {
+  AISettingsDialog,
+  saveSettings,
+  useAISettings,
+} from "@/components/AISettings";
 
 type Img = { id: string; url: string; mediaType: string; data: string };
 
@@ -56,6 +62,9 @@ export default function Home() {
   const [thinking, setThinking] = useState("");
   const [answer, setAnswer] = useState("");
   const [error, setError] = useState("");
+  const [meta, setMeta] = useState("");
+  const settings = useAISettings();
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const resultRef = useRef<HTMLDivElement>(null);
@@ -71,6 +80,10 @@ export default function Home() {
     }
   }, []);
 
+  const active = settings.provider;
+  const activeCfg = settings.byProvider[active];
+  const configured = Boolean(activeCfg.apiKey.trim());
+
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       const files = Array.from(e.clipboardData?.files ?? []);
@@ -84,17 +97,32 @@ export default function Home() {
   }, [addFiles]);
 
   const canSubmit =
-    !loading && (text.trim() || images.length || Object.values(params).some((v) => v.trim()));
+    !loading &&
+    (text.trim() ||
+      images.length ||
+      Object.values(params).some((v) => v.trim()));
 
   async function submit() {
     if (!canSubmit) return;
+    if (!configured) {
+      setSettingsOpen(true);
+      return;
+    }
     setLoading(true);
+    setMeta("");
     setAnswer("");
     setThinking("");
     setError("");
     const ac = new AbortController();
     abortRef.current = ac;
-    setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+    setTimeout(
+      () =>
+        resultRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        }),
+      50,
+    );
 
     try {
       const res = await fetch("/api/analyze", {
@@ -104,6 +132,7 @@ export default function Home() {
           text,
           params,
           images: images.map(({ mediaType, data }) => ({ mediaType, data })),
+          ai: { provider: active, ...activeCfg },
         }),
         signal: ac.signal,
       });
@@ -126,6 +155,7 @@ export default function Home() {
           if (ev.t === "text") setAnswer((a) => a + ev.v);
           else if (ev.t === "thinking") setThinking((a) => a + ev.v);
           else if (ev.t === "error") setError(ev.v ?? "未知错误");
+          else if (ev.t === "meta") setMeta(ev.v ?? "");
         }
       }
     } catch (e) {
@@ -144,18 +174,32 @@ export default function Home() {
             <GridIcon />
             <span>网格交易助手</span>
           </div>
-          <nav className="flex gap-1 text-sm">
+          <nav className="flex gap-1 text-sm items-center">
             {(["ask", "rules"] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
                 className={`px-3 py-1.5 rounded-md transition ${
-                  tab === t ? "bg-accent text-white" : "text-muted hover:bg-soft"
+                  tab === t
+                    ? "bg-accent text-white"
+                    : "text-muted hover:bg-soft"
                 }`}
               >
                 {t === "ask" ? "交易建议" : "交易规则"}
               </button>
             ))}
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="ml-1 px-3 py-1.5 rounded-md border border-line hover:bg-soft flex items-center gap-1.5"
+              title="配置 AI 服务与 API Key"
+            >
+              <span
+                className={`h-2 w-2 rounded-full ${configured ? "bg-emerald-500" : "bg-amber-500"}`}
+                aria-hidden
+              />
+              <span className="hidden sm:inline">AI 设置 ·</span>
+              {PROVIDERS[active].name}
+            </button>
           </nav>
         </div>
       </header>
@@ -163,7 +207,9 @@ export default function Home() {
       <main className="mx-auto max-w-4xl px-4 py-6 space-y-6">
         {tab === "rules" ? (
           <article className="md rounded-xl border border-line bg-panel p-5 sm:p-8">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{GRID_RULES}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {GRID_RULES}
+            </ReactMarkdown>
           </article>
         ) : (
           <>
@@ -172,7 +218,10 @@ export default function Home() {
                 <h1 className="text-lg font-semibold">描述你的持仓或行情</h1>
                 <p className="text-sm text-muted mt-1">
                   可以输入文字、上传/粘贴截图（行情、持仓、K 线均可），AI 会按
-                  <button onClick={() => setTab("rules")} className="text-accent underline mx-1">
+                  <button
+                    onClick={() => setTab("rules")}
+                    className="text-accent underline mx-1"
+                  >
                     网格交易规则
                   </button>
                   给出操作建议。
@@ -227,7 +276,9 @@ export default function Home() {
                         className="h-20 w-20 object-cover rounded-md border border-line"
                       />
                       <button
-                        onClick={() => setImages((p) => p.filter((i) => i.id !== img.id))}
+                        onClick={() =>
+                          setImages((p) => p.filter((i) => i.id !== img.id))
+                        }
                         className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-fg text-bg text-xs leading-5"
                         aria-label="删除图片"
                       >
@@ -263,7 +314,8 @@ export default function Home() {
                   onClick={() => setShowParams((s) => !s)}
                   className="text-sm text-muted hover:text-fg"
                 >
-                  {showParams ? "▾" : "▸"} 补充结构化信息（可选，越完整建议越准确）
+                  {showParams ? "▾" : "▸"}{" "}
+                  补充结构化信息（可选，越完整建议越准确）
                 </button>
                 {showParams && (
                   <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -272,7 +324,12 @@ export default function Home() {
                         <span className="text-muted">{f.label}</span>
                         <input
                           value={params[f.key] ?? ""}
-                          onChange={(e) => setParams((p) => ({ ...p, [f.key]: e.target.value }))}
+                          onChange={(e) =>
+                            setParams((p) => ({
+                              ...p,
+                              [f.key]: e.target.value,
+                            }))
+                          }
                           placeholder={f.placeholder}
                           className="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 outline-none focus:border-accent"
                         />
@@ -305,7 +362,10 @@ export default function Home() {
               {(loading || answer || error || thinking) && (
                 <section className="rounded-xl border border-line bg-panel p-4 sm:p-6 space-y-4">
                   {thinking && (
-                    <details className="rounded-lg bg-soft px-3 py-2 text-sm" open={loading && !answer}>
+                    <details
+                      className="rounded-lg bg-soft px-3 py-2 text-sm"
+                      open={loading && !answer}
+                    >
                       <summary className="cursor-pointer text-muted select-none">
                         {loading && !answer ? "AI 正在思考…" : "查看思考过程"}
                       </summary>
@@ -320,9 +380,14 @@ export default function Home() {
                       正在识别信息并对照规则计算…
                     </div>
                   )}
+                  {meta && !loading && answer && (
+                    <div className="text-xs text-muted">由 {meta} 生成</div>
+                  )}
                   {answer && (
                     <article className="md">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {answer}
+                      </ReactMarkdown>
                     </article>
                   )}
                   {error && (
@@ -336,8 +401,21 @@ export default function Home() {
           </>
         )}
 
+        {settingsOpen && (
+          <AISettingsDialog
+            open
+            initial={settings}
+            onClose={() => setSettingsOpen(false)}
+            onSave={(s) => {
+              saveSettings(s);
+              setSettingsOpen(false);
+            }}
+          />
+        )}
+
         <footer className="text-center text-xs text-muted pb-8">
-          规则整理自网络公开分享，AI 输出仅供学习参考，不构成投资建议。市场有风险，投资需谨慎。
+          规则整理自网络公开分享，AI
+          输出仅供学习参考，不构成投资建议。市场有风险，投资需谨慎。
         </footer>
       </main>
     </div>
@@ -348,8 +426,19 @@ function GridIcon() {
   return (
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden>
       <rect x="2" y="2" width="20" height="20" rx="5" className="fill-accent" />
-      <path d="M5 9h14M5 13h14M5 17h14" stroke="white" strokeOpacity=".45" strokeWidth="1.2" />
-      <path d="M5 15.5 9 10l3.5 4L19 7" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d="M5 9h14M5 13h14M5 17h14"
+        stroke="white"
+        strokeOpacity=".45"
+        strokeWidth="1.2"
+      />
+      <path
+        d="M5 15.5 9 10l3.5 4L19 7"
+        stroke="white"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }

@@ -1,0 +1,131 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --fg: #16181d;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --soft: #f1f3f6;
+  --accent: #e0382f; /* 红：买入 / 上涨 (A 股习惯) */
+  --down: #c2410c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --panel: #171a20;
+    --fg: #e8eaed;
+    --muted: #9aa1ac;
+    --line: #2a2f38;
+    --soft: #20242c;
+    --accent: #f0544b;
+    --down: #fb923c;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-soft: var(--soft);
+  --color-accent: var(--accent);
+  --color-down: var(--down);
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+}
+
+/* Markdown 渲染 */
+.md {
+  line-height: 1.75;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+.md h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0 0 1rem;
+}
+.md h2 {
+  font-size: 1.15rem;
+  font-weight: 650;
+  margin: 1.6rem 0 0.6rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--line);
+}
+.md h3 {
+  font-size: 1rem;
+  font-weight: 650;
+  margin: 1.2rem 0 0.4rem;
+}
+.md > :first-child {
+  margin-top: 0;
+}
+.md p,
+.md ul,
+.md ol {
+  margin: 0.5rem 0;
+}
+.md ul {
+  list-style: disc;
+  padding-left: 1.4rem;
+}
+.md ol {
+  list-style: decimal;
+  padding-left: 1.4rem;
+}
+.md strong {
+  color: var(--accent);
+  font-weight: 650;
+}
+.md code {
+  background: var(--soft);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+.md pre {
+  background: var(--soft);
+  padding: 0.8rem;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.md pre code {
+  background: none;
+  padding: 0;
+}
+.md blockquote {
+  border-left: 3px solid var(--line);
+  padding-left: 0.8rem;
+  color: var(--muted);
+}
+.md table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0.8rem 0;
+  font-size: 14px;
+}
+.md th,
+.md td {
+  border: 1px solid var(--line);
+  padding: 0.45rem 0.7rem;
+  text-align: left;
+  white-space: nowrap;
+}
+.md th {
+  background: var(--soft);
+  font-weight: 600;
+}
+.md hr {
+  border-color: var(--line);
+  margin: 1.2rem 0;
+}
