@@ -57,7 +57,7 @@ function render(data) {
   $("#summary").replaceChildren(
     stat("监控标的", items.length),
     stat("当前交易信号", data.check?.signalCount ?? "—", (data.check?.signalCount ?? 0) > 0),
-    stat("邮件提醒", s.email ? `发送到 ${s.email.to.join("、")}` : "未配置"),
+    stat("提醒渠道", s.channels.length ? s.channels.join("、") : "未配置"),
     stat("AI", s.ai ? `${s.ai.name} · ${s.ai.model}` : "未配置"),
   );
 

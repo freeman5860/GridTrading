@@ -7,7 +7,8 @@ import { loadConfig, type Config } from "./config.js";
 import { MARKETS, marketOf } from "./core/symbol.js";
 import type { Market } from "./core/types.js";
 import { isMarketOpen, localTime, nextOpen } from "./market/hours.js";
-import { createEmailNotifier, type Notifier } from "./notify/email.js";
+import type { Notifier } from "./notify/email.js";
+import { channelsFor, combine, NotifyError, type SendReport } from "./notify/index.js";
 import { renderSignalEmail, signalItems, type RenderedEmail } from "./notify/render.js";
 import { emailComment } from "./ai/analyze.js";
 import { createAIClient, describeAIError, PROVIDER_INFO, type AIClient } from "./ai/providers.js";
@@ -16,7 +17,7 @@ export const ALL_MARKETS: Market[] = ["cn", "hk", "us"];
 
 export type TickOutcome =
   | { status: "closed"; nextOpen: { market: Market; at: Date }[] }
-  | { status: "checked"; markets: Market[]; result: CheckResult; notified: boolean }
+  | { status: "checked"; markets: Market[]; result: CheckResult; notified: boolean; report?: SendReport }
   | { status: "notify-failed"; markets: Market[]; result: CheckResult; error: string };
 
 export interface TickDeps {
@@ -34,8 +35,8 @@ export function watchedMarkets(config: Config): Market[] {
   return configured.filter((m) => present.has(m));
 }
 
-export function notifierFor(config: Config): Notifier | null {
-  return config.notify?.email ? createEmailNotifier(config.notify.email) : null;
+export function notifierFor(config: Config) {
+  return combine(channelsFor(config));
 }
 
 export async function tick(config: Config, deps: TickDeps = {}): Promise<TickOutcome> {
@@ -52,17 +53,20 @@ export async function tick(config: Config, deps: TickDeps = {}): Promise<TickOut
   const shouldNotify = notifier && (result.signalCount > 0 || config.notify?.always);
 
   let notified = false;
+  let report: SendReport | undefined;
   if (shouldNotify) {
     try {
-      await notifier.send(await buildSignalEmail(config, result, deps.ai));
+      report = (await notifier.send(await buildSignalEmail(config, result, deps.ai))) ?? undefined;
       notified = true;
     } catch (e) {
-      // 不保存状态：下次检查会重新产生这些信号并再次尝试发送，避免"每轮只提醒一次"的信号丢失
-      return { status: "notify-failed", markets: open, result, error: (e as Error).message };
+      // 所有渠道都失败：不保存状态，下次检查会重新产生这些信号并再次发送，避免"每轮只提醒一次"的信号丢失。
+      // 只要有一个渠道成功就保存状态，否则成功的渠道会重复收到提醒。
+      const error = e instanceof NotifyError ? e.message : (e as Error).message;
+      return { status: "notify-failed", markets: open, result, error };
     }
   }
   await prepared.commit();
-  return { status: "checked", markets: open, result, notified };
+  return { status: "checked", markets: open, result, notified, report };
 }
 
 /** 渲染信号邮件；开启 ai.emailComment 时附带 AI 点评，点评失败不影响发送 */

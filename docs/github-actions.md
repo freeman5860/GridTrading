@@ -30,12 +30,15 @@
    | 名称 | 内容 |
    |---|---|
    | `GRIDBOT_CONFIG` | 整份 `gridbot.yaml` 的内容（直接粘贴） |
-   | `SMTP_PASS` | 邮箱的 SMTP 授权码 |
+   | `SMTP_PASS` | 邮箱的 SMTP 授权码（用邮件提醒时） |
+   | `WECOM_WEBHOOK`、`DINGTALK_WEBHOOK`、`FEISHU_WEBHOOK`、`TG_BOT_TOKEN`、`BARK_URL`、`SCKEY` 等 | 用到哪个推送渠道就填哪个（可选） |
    | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` | 用到哪个 AI 就填哪个（可选） |
 
 4. **启用**：同一页面切到 Variables，添加 `GRIDBOT_ENABLED`，值为 `true`。
 
 5. **打开 Actions**：进入仓库的 Actions 页面。fork 的仓库需要先点击确认启用 workflow。然后选择 gridbot → Run workflow 手动运行一次，查看日志是否正常。
+
+`GRIDBOT_CONFIG` 本身就是 Secret，所以机器人地址也可以直接写在配置里，不一定要拆成单独的 Secret。
 
 ## 为什么持仓放在 Secret 里
 

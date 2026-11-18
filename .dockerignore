@@ -1,0 +1,6 @@
+node_modules
+dist
+.git
+.gridbot
+gridbot.yaml
+*.log

@@ -14,6 +14,7 @@ import { ConfigError, loadConfig, updateHoldingInFile, type Config, type Holding
 import { MARKETS, normalizeSymbol } from "../core/symbol.js";
 import { describeSessions, isMarketOpen, localTime, nextOpen } from "../market/hours.js";
 import { ALL_MARKETS, describeNextOpen } from "../scheduler.js";
+import { channelName } from "../notify/webhook.js";
 import { loadState, saveState } from "../state.js";
 
 export interface ServeOptions {
@@ -187,6 +188,11 @@ export function publicSettings(config: Config) {
     interval: config.schedule.interval,
     ai: ai ? { provider: ai.provider, name: PROVIDER_INFO[ai.provider].name, model: ai.model || PROVIDER_INFO[ai.provider].defaultModel, emailComment: ai.emailComment } : null,
     email: email ? { host: email.host, to: email.to } : null,
+    // 只返回渠道名称：机器人地址、Key 都是密钥
+    channels: [
+      ...(email ? [`邮件（${email.to.join("、")}）`] : []),
+      ...(config.notify?.webhooks ?? []).map(channelName),
+    ],
   };
 }
 

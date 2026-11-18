@@ -1,6 +1,7 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import { z } from "zod";
 import type { RenderedEmail } from "./render.js";
+import type { SendReport } from "./index.js";
 
 export const emailConfigSchema = z
   .object({
@@ -18,7 +19,8 @@ export const emailConfigSchema = z
 export type EmailConfig = z.output<typeof emailConfigSchema>;
 
 export interface Notifier {
-  send(mail: RenderedEmail): Promise<void>;
+  /** 多渠道组合时返回各渠道的发送结果 */
+  send(mail: RenderedEmail): Promise<void | SendReport>;
 }
 
 export function createEmailNotifier(cfg: EmailConfig, transport?: Transporter): Notifier {

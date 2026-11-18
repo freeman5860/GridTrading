@@ -5,6 +5,7 @@ import { z } from "zod";
 import { normalizeSymbol, SymbolError } from "./core/symbol.js";
 import type { GridStep, Holding, Market } from "./core/types.js";
 import { emailConfigSchema } from "./notify/email.js";
+import { webhookSchema } from "./notify/webhook.js";
 
 z.config(z.locales.zhCN()); // 校验错误信息使用中文
 
@@ -81,6 +82,8 @@ const configSchema = z.object({
   notify: z
     .object({
       email: emailConfigSchema.optional(),
+      /** 即时通讯推送：企业微信 / 钉钉 / 飞书 / Telegram / Bark / Server酱 / 通用 Webhook */
+      webhooks: z.array(webhookSchema).default([]),
       /** 没有交易信号时也发邮件（默认只在有信号时发送） */
       always: z.boolean().default(false),
     })
@@ -223,7 +226,7 @@ schedule:
   interval: 15m            # 检查间隔：30s / 15m / 1h，最少 1 分钟
   # markets: [cn, hk, us]  # 只监控部分市场
 
-# 邮件提醒：有交易信号时发送（gridbot run / gridbot check --notify）
+# 提醒：有交易信号时通过邮件和/或手机推送发送（gridbot run / gridbot check --notify）
 # notify:
 #   email:
 #     host: smtp.qq.com    # QQ 邮箱；163 为 smtp.163.com，Gmail 为 smtp.gmail.com
@@ -231,6 +234,15 @@ schedule:
 #     user: you@qq.com
 #     pass: \${SMTP_PASS}   # QQ/163 邮箱填"授权码"，不是登录密码；Gmail 填应用专用密码
 #     to: you@qq.com       # 可以是列表：[a@x.com, b@y.com]
+#   webhooks:              # 手机推送（可多个，与邮件同时发送）
+#     - type: wecom        # 企业微信群机器人
+#       url: \${WECOM_WEBHOOK}
+#     # - { type: dingtalk, url: \${DINGTALK_WEBHOOK}, secret: \${DINGTALK_SECRET} }   # 钉钉（加签可选）
+#     # - { type: feishu, url: \${FEISHU_WEBHOOK}, secret: \${FEISHU_SECRET} }         # 飞书（签名校验可选）
+#     # - { type: telegram, botToken: \${TG_BOT_TOKEN}, chatId: "123456" }
+#     # - { type: bark, url: \${BARK_URL} }            # iOS Bark，如 https://api.day.app/你的Key
+#     # - { type: serverchan, sendKey: \${SCKEY} }     # Server酱，推送到微信
+#     # - { type: webhook, url: https://example.com/hook }   # 通用：POST JSON {title, text, html}
 #   always: false          # true 时没有信号也发送（不建议）
 
 # AI 分析（gridbot analyze）与邮件点评，可选

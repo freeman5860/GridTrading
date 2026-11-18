@@ -8,7 +8,7 @@
 
 功能：
 
-- **监控**：`gridbot run` 在各市场交易时段内定时检查，有信号时发邮件。
+- **监控**：`gridbot run` 在各市场交易时段内定时检查，有信号时通过邮件、企业微信、钉钉、飞书、Telegram、Bark、Server酱提醒。
 - **控制台**：`gridbot serve` 启动本地网页，查看持仓和信号，成交后一键更新持仓，上传截图让 AI 分析。
 - **免服务器**：用 GitHub Actions 定时运行，见 [docs/github-actions.md](docs/github-actions.md)。
 - **AI**：支持 Claude / ChatGPT（含 OpenAI 兼容服务）/ Gemini / 本地部署的模型（如 Ollama 上的 Qwen），负责识别截图和解读信号，不参与计算。
@@ -42,7 +42,7 @@ gridbot check               # 拉取行情并检查
 | `gridbot run --once` | 只检查当前开盘的市场一次，适合 cron / GitHub Actions |
 | `gridbot analyze 截图.png -t "说明"` | AI 识别截图 / 文字中的持仓，规则引擎计算后由 AI 解读 |
 | `gridbot analyze -s 510300` | AI 解读配置中某个标的的当前状态 |
-| `gridbot notify-test` | 发送测试邮件，检查 SMTP 配置 |
+| `gridbot notify-test` | 向所有提醒渠道发送测试消息，逐个显示结果 |
 | `gridbot markets` | 查看各市场是否开盘、交易时段和下次开盘时间 |
 | `gridbot serve` | 启动本地网页控制台（默认 http://127.0.0.1:8686） |
 | `gridbot quote 510300 700 AAPL` | 查询实时行情 |
@@ -92,6 +92,31 @@ notify:
     pass: ${SMTP_PASS}     # QQ / 163 填"授权码"（邮箱设置里开启 SMTP 后获取），Gmail 填应用专用密码
     to: you@qq.com         # 也可以是列表
 ```
+
+#### 手机推送
+
+可以和邮件同时使用，配置多个渠道时会同时发送：
+
+```yaml
+notify:
+  webhooks:
+    - type: wecom                     # 企业微信群机器人
+      url: ${WECOM_WEBHOOK}
+    - type: dingtalk                  # 钉钉群机器人；安全设置选"加签"时填 secret
+      url: ${DINGTALK_WEBHOOK}        # 选"自定义关键词"时，关键词填 gridbot
+      secret: ${DINGTALK_SECRET}
+    - type: feishu                    # 飞书群机器人；开启"签名校验"时填 secret
+      url: ${FEISHU_WEBHOOK}
+      secret: ${FEISHU_SECRET}
+    - { type: telegram, botToken: ${TG_BOT_TOKEN}, chatId: "123456789" }
+    - { type: bark, url: ${BARK_URL} }        # iOS Bark App，如 https://api.day.app/你的Key
+    - { type: serverchan, sendKey: ${SCKEY} } # Server酱，推送到微信
+    - { type: webhook, url: https://example.com/hook, name: 我的服务 }   # 通用：POST JSON {title, text, html}
+```
+
+每个渠道可以用 `name` 起名字，方便在日志里区分。机器人地址和 Key 都是密钥，建议用 `${环境变量}` 填写；gridbot 的日志和报错不会输出它们。
+
+多个渠道中只要有一个发送成功，就算已提醒；全部失败时不保存状态，下次检查重新提醒。
 
 ```bash
 export SMTP_PASS=你的授权码
@@ -176,6 +201,16 @@ gridbot serve --port 9000
 ### GitHub Actions（无需服务器）
 
 Fork 本仓库，把配置放进 Secret `GRIDBOT_CONFIG`，设置变量 `GRIDBOT_ENABLED=true`，GitHub 就会在交易日定时检查并发邮件。详细步骤和注意事项见 [docs/github-actions.md](docs/github-actions.md)。
+
+### Docker
+
+```bash
+docker build -t gridbot .
+docker run -d --name gridbot -v "$PWD:/data" -e SMTP_PASS=授权码 gridbot                       # 定时监控
+docker run -d -p 127.0.0.1:8686:8686 -v "$PWD:/data" gridbot serve --host 0.0.0.0             # 网页控制台
+```
+
+当前目录需要有 `gridbot.yaml`，状态文件也会写在这里。容器以 `node` 用户（uid 1000）运行，如果写入状态时提示没有权限，请调整目录权限。
 
 ## 开发
 

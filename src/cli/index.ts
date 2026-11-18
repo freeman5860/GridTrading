@@ -7,6 +7,7 @@ import { MARKETS, normalizeSymbol } from "../core/symbol.js";
 import { describeSessions, isMarketOpen, localTime, nextOpen as nextOpenSafe } from "../market/hours.js";
 import { getQuoteSource } from "../market/source.js";
 import { renderTestEmail } from "../notify/render.js";
+import { describeChannels, type SendReport } from "../notify/index.js";
 import { ALL_MARKETS, buildSignalEmail, describeNextOpen, notifierFor, runLoop, tick, type TickOutcome } from "../scheduler.js";
 import { analyzePrompt, analyzeSystemPrompt, MAX_IMAGES, readImage } from "../ai/analyze.js";
 import { createAIClient, errorMessage, PROVIDER_INFO } from "../ai/providers.js";
@@ -40,7 +41,7 @@ program
   .option("-n, --dry-run", "只输出结果，不保存已触发档位等状态")
   .option("--json", "以 JSON 输出（便于脚本处理）")
   .option("--exit-code", "有交易信号时以退出码 10 结束（便于 cron / CI 判断）")
-  .option("--notify", "有交易信号时发送邮件（需要配置 notify.email）")
+  .option("--notify", "有交易信号时发送提醒（需要配置 notify.email 或 notify.webhooks）")
   .action(async (opts: { dryRun?: boolean; json?: boolean; exitCode?: boolean; notify?: boolean }) => {
     const config = await loadConfig(program.opts<{ config: string }>().config);
     const { result, commit } = await prepareCheck(config);
@@ -49,10 +50,10 @@ program
 
     if (opts.notify && (result.signalCount > 0 || config.notify?.always)) {
       const notifier = notifierFor(config);
-      if (!notifier) fail("未配置 notify.email，无法发送邮件");
-      // 发送失败时不保存状态，下次检查会重新提醒
-      await notifier.send(await buildSignalEmail(config, result));
-      console.log(`已发送邮件到 ${config.notify!.email!.to.join("、")}`);
+      if (!notifier) fail("未配置提醒渠道（notify.email 或 notify.webhooks）");
+      // 全部渠道失败时不保存状态，下次检查会重新提醒
+      const report = await notifier.send(await buildSignalEmail(config, result));
+      printReport(report);
     }
     await commit();
     finish(result.signalCount, result.items.some((i) => i.error), opts.exitCode);
@@ -87,7 +88,7 @@ program
     }
 
     const every = Math.round((interval ?? config.schedule.interval) / 60_000);
-    log(`gridbot 开始运行：每 ${every} 分钟检查一次，${notifier ? `信号发送到 ${config.notify!.email!.to.join("、")}` : "未配置邮件提醒（只在终端输出）"}`);
+    log(`gridbot 开始运行：每 ${every} 分钟检查一次，${notifier ? `信号发送到 ${describeChannels(notifier.channels)}` : "未配置提醒渠道（只在终端输出）"}`);
     const ac = new AbortController();
     const stop = () => {
       log("收到退出信号，停止运行");
@@ -113,12 +114,13 @@ function printTick(outcome: TickOutcome) {
     `检查 ${names}：${checked} 个标的` +
       (skipped ? `，${skipped} 个休市跳过` : "") +
       `，${result.signalCount ? `${result.signalCount} 个交易信号` : "无交易信号"}` +
-      (outcome.status === "checked" && outcome.notified ? "，已发送邮件" : ""),
+      (outcome.status === "checked" && outcome.notified ? `，已发送到 ${outcome.report?.sent.join("、") ?? "提醒渠道"}` : ""),
   );
+  if (outcome.status === "checked") for (const f of outcome.report?.failed ?? []) log(`⚠ ${f.error}`);
   for (const item of result.items) {
     if (item.error || (item.evaluation?.signals.length ?? 0) > 0) console.log(formatItem(item));
   }
-  if (outcome.status === "notify-failed") log(`⚠ ${outcome.error}。状态未保存，下次检查会再次尝试发送`);
+  if (outcome.status === "notify-failed") log(`⚠ 所有提醒渠道都发送失败：${outcome.error}。状态未保存，下次检查会再次尝试发送`);
 }
 
 program
@@ -214,14 +216,24 @@ program
 
 program
   .command("notify-test")
-  .description("发送一封测试邮件，检查 SMTP 配置")
+  .description("向所有提醒渠道（邮件、手机推送）发送一条测试消息")
   .action(async () => {
     const config = await loadConfig(program.opts<{ config: string }>().config);
     const notifier = notifierFor(config);
-    if (!notifier) fail("未配置 notify.email");
-    await notifier.send(renderTestEmail());
-    console.log(`测试邮件已发送到 ${config.notify!.email!.to.join("、")}，请查收（也看看垃圾邮件箱）`);
+    if (!notifier) fail("未配置提醒渠道（notify.email 或 notify.webhooks）");
+    const results = await Promise.allSettled(notifier.channels.map((c) => c.notifier.send(renderTestEmail())));
+    results.forEach((r, i) => {
+      const name = notifier.channels[i]!.name;
+      console.log(r.status === "fulfilled" ? `✓ ${name}：已发送，请查收` : `✗ ${(r.reason as Error).message}`);
+    });
+    if (results.some((r) => r.status === "rejected")) process.exitCode = 1;
   });
+
+function printReport(report: SendReport | void) {
+  if (!report) return;
+  console.log(`已发送到 ${report.sent.join("、")}`);
+  for (const f of report.failed) console.log(`⚠ ${f.error}`);
+}
 
 program
   .command("markets")
