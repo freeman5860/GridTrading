@@ -28,6 +28,7 @@ export async function loadStatus() {
   $("#refresh").disabled = true;
   try {
     last = await api("/api/status");
+    if (last.missing) return renderMissing(last);
     render(last);
     listeners.forEach((fn) => fn(last));
   } catch (e) {
@@ -38,7 +39,7 @@ export async function loadStatus() {
   }
 }
 
-function render(data) {
+function renderMarkets(data) {
   $("#markets").replaceChildren(
     ...data.markets.map((m) =>
       h(
@@ -49,6 +50,26 @@ function render(data) {
       ),
     ),
   );
+}
+
+/** 还没有配置文件：引导到设置向导 */
+function renderMissing(data) {
+  renderMarkets(data);
+  $("#summary").replaceChildren();
+  $("#config-path").textContent = `配置文件：${data.configPath}（尚未创建）`;
+  $("#holdings").replaceChildren(
+    h(
+      "div",
+      { class: "card welcome" },
+      h("div", { class: "card-title" }, "欢迎使用 gridbot"),
+      h("p", { class: "muted" }, "还没有配置文件。用设置向导填写持仓、选择提醒渠道、接入 AI，大约 3 分钟。"),
+      h("div", {}, h("a", { class: "btn primary", href: "#setup" }, "开始设置")),
+    ),
+  );
+}
+
+function render(data) {
+  renderMarkets(data);
   $("#updated").textContent = `更新于 ${new Date(data.now).toLocaleTimeString("zh-CN", { hour12: false })}`;
   $("#config-path").textContent = `配置文件：${data.configPath}`;
 
@@ -57,8 +78,8 @@ function render(data) {
   $("#summary").replaceChildren(
     stat("监控标的", items.length),
     stat("当前交易信号", data.check?.signalCount ?? "—", (data.check?.signalCount ?? 0) > 0),
-    stat("提醒渠道", s.channels.length ? s.channels.join("、") : "未配置"),
-    stat("AI", s.ai ? `${s.ai.name} · ${s.ai.model}` : "未配置"),
+    stat("提醒渠道", s.channels.length ? s.channels.join("、") : setupLink("未配置，去设置")),
+    stat("AI", s.ai ? `${s.ai.name} · ${s.ai.model}` : setupLink("未配置，去设置")),
   );
 
   if (data.checkError) {
@@ -68,6 +89,8 @@ function render(data) {
   $("#holdings").replaceChildren(...items.map((item) => card(item, data.state[item.holding.symbol])));
 }
 
+const setupLink = (text) => h("a", { href: "#setup", class: "setup-link" }, text);
+
 function stat(label, value, alert = false) {
   return h("div", { class: "stat" }, h("div", { class: "label" }, label), h("div", { class: `value ${alert ? "alert" : ""}` }, value));
 }
@@ -75,7 +98,7 @@ function stat(label, value, alert = false) {
 function card(item, state) {
   const { holding, quote, evaluation: ev } = item;
   const name = quote?.name ?? holding.name ?? holding.symbol;
-  const market = quote ? MARKET_NAME[quote.market] : "";
+  const market = holding.connect ? "港股通" : quote ? MARKET_NAME[quote.market] : "";
   const signals = ev?.signals ?? [];
   const digits = quote?.market === "us" ? 2 : 3; // 价格显示精度
 
@@ -103,7 +126,7 @@ function card(item, state) {
         { class: "kv" },
         h("div", {}, h("span", {}, "基准价"), num(ev.basePrice)),
         h("div", {}, h("span", {}, "持仓"), holding.position),
-        h("div", {}, h("span", {}, "可用资金"), holding.cash === undefined ? "不限" : money(holding.cash)),
+        h("div", {}, h("span", {}, holding.connect ? "可用资金（人民币）" : "可用资金"), holding.cash === undefined ? "不限" : holding.connect ? `¥${money(holding.cash)}` : money(holding.cash)),
       ),
     );
     if (holding.tiers !== false) body.push(ladder(ev.change, state?.triggered ?? []));
@@ -119,7 +142,7 @@ function card(item, state) {
                 { class: "signal" },
                 h("span", { class: `act ${s.action}` }, s.action === "buy" ? "买入" : "卖出"),
                 h("b", { class: "num" }, s.quantity),
-                h("span", { class: "num" }, `@ ${num(s.price)} ≈ ${money(s.amount)} ${quote.currency}`),
+                h("span", { class: "num" }, `@ ${num(s.price)} ≈ ${money(s.amount)} ${quote.currency}${s.amountCny !== undefined ? `（约 ¥${money(s.amountCny)}）` : ""}`),
                 h("span", { class: "tag" }, s.layer === "tier" ? "分档" : "网格"),
                 h("span", { class: "why" }, s.reason),
               ),
@@ -197,7 +220,7 @@ function editHolding(holding) {
     fields: [
       { name: "position", label: "持仓数量", value: holding.position, step: "1", required: true },
       { name: "basePrice", label: "基准价 P0", value: holding.basePrice, required: true },
-      { name: "cash", label: "可用资金（留空表示不限制）", value: holding.cash ?? "" },
+      { name: "cash", label: `可用资金${holding.connect ? "（人民币）" : ""}（留空表示不限制）`, value: holding.cash ?? "" },
     ],
     okText: "保存",
     onOk: async (v) => {

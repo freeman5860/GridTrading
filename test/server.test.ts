@@ -164,3 +164,135 @@ describe("接口", () => {
     expect(markdown).toContain("第一层：分档仓位管理");
   });
 });
+
+describe("设置向导", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const getSetup = async (): Promise<any> => (await fetch(base + "/api/setup")).json();
+  const HOOK_KEY = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=SECRET-hook";
+
+  it("读取配置：密钥只返回是否已设置，从不返回内容", async () => {
+    vi.stubEnv("TG_TOKEN", "123:abc");
+    await writeFile(configPath, CONFIG + `  - symbol: AAPL\n    basePrice: 200\n    position: 10\n    grid: { lower: 180, upper: 220, step: "2%", size: 1 }\n`);
+    const saved = await post("/api/setup/notify", {
+      email: { host: "smtp.qq.com", port: 465, user: "a@qq.com", to: "a@qq.com" },
+      webhooks: [{ type: "wecom", url: HOOK_KEY }, { type: "telegram", botToken: "${TG_TOKEN}", chatId: "42" }],
+    });
+    expect(saved.status).toBe(200);
+    const res = await fetch(base + "/api/setup");
+    const text = await res.text();
+    for (const s of [SECRET_KEY, SECRET_PASS, HOOK_KEY, "SECRET-hook"]) expect(text).not.toContain(s);
+    const data = JSON.parse(text);
+    expect(data.exists).toBe(true);
+    expect(data.watchlist.map((h: { symbol: string }) => h.symbol)).toEqual(["510300", "hk02800", "AAPL"]);
+    expect(data.watchlist[2].grid).toMatchObject({ lower: 180, step: "2%" });
+    expect(data.notify.email.pass).toEqual({ set: true });
+    expect(data.notify.webhooks[0].secrets.url).toEqual({ set: true });
+    expect(data.notify.webhooks[1].secrets.botToken).toEqual({ set: true, env: "TG_TOKEN", envSet: true });
+    expect(data.ai).toMatchObject({ provider: "claude", apiKey: { set: true } });
+    vi.unstubAllEnvs();
+  });
+
+  it("保存持仓：保留注释和原有代码写法，支持增删", async () => {
+    const res = await post("/api/setup/watchlist", {
+      items: [
+        { symbol: "sh510300", basePrice: 4.2, position: 9000, cash: 1000, tiers: true },
+        { symbol: "QQQ", basePrice: 600, position: 5, tiers: false, grid: { lower: 560, upper: 680, step: "2%", size: 1 } },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const text = await readFile(configPath, "utf8");
+    expect(text).toContain("# 顶部注释");
+    expect(text).toContain("# 行内注释");
+    expect(text).toContain("symbol: 510300");
+    expect(text).toContain("basePrice: 4.2");
+    expect(text).not.toContain("hk02800");
+    expect(text).toContain("symbol: QQQ");
+    expect(text).toContain("tiers: false");
+    expect(text).toMatch(/step: "?2%"?/);
+    // 密钥原样保留
+    expect(text).toContain(SECRET_KEY);
+  });
+
+  it("保存持仓：港股通标记", async () => {
+    await post("/api/setup/watchlist", { items: [{ symbol: "hk02800", basePrice: 20, position: 5000, cash: 10000, connect: true }] });
+    expect(await readFile(configPath, "utf8")).toContain("connect: true");
+    expect((await getSetup()).watchlist[0]).toMatchObject({ symbol: "hk02800", connect: true });
+    await post("/api/setup/watchlist", { items: [{ symbol: "hk02800", basePrice: 20, position: 5000, connect: false }] });
+    expect(await readFile(configPath, "utf8")).not.toContain("connect");
+    // A 股不能设置港股通
+    expect((await post("/api/setup/watchlist", { items: [{ symbol: "510300", basePrice: 4, position: 1, connect: true }] })).status).toBe(400);
+  });
+
+  it("保存持仓：非法值返回错误且不写入", async () => {
+    const before = await readFile(configPath, "utf8");
+    expect((await post("/api/setup/watchlist", { items: [] })).status).toBe(400);
+    expect((await post("/api/setup/watchlist", { items: [{ symbol: "510300", basePrice: 0, position: 1 }] })).status).toBe(400);
+    expect((await post("/api/setup/watchlist", { items: [{ symbol: "510300", basePrice: "abc", position: 1 }] })).status).toBe(400);
+    expect(await readFile(configPath, "utf8")).toBe(before);
+  });
+
+  it("保存提醒渠道：密钥留空保持原值，按序号保留推送渠道的密钥", async () => {
+    await post("/api/setup/notify", { email: { host: "smtp.163.com", port: 465, user: "b@163.com", to: "b@163.com, c@163.com" }, webhooks: [{ type: "bark", url: "https://api.day.app/KEY1" }], interval: "5m" });
+    let text = await readFile(configPath, "utf8");
+    expect(text).toContain(SECRET_PASS);
+    expect(text).toContain("smtp.163.com");
+    expect(text).toContain("c@163.com");
+    expect(text).toContain("interval: 5m");
+
+    // 修改名称、不填地址：地址保持不变
+    await post("/api/setup/notify", { email: null, webhooks: [{ index: 0, type: "bark", name: "我的手机" }] });
+    text = await readFile(configPath, "utf8");
+    expect(text).toContain("https://api.day.app/KEY1");
+    expect(text).toContain("我的手机");
+    expect(text).not.toContain("email");
+
+    // 新增渠道缺少地址：校验失败
+    expect((await post("/api/setup/notify", { webhooks: [{ type: "wecom" }] })).status).toBe(400);
+
+    await post("/api/setup/notify", { email: null, webhooks: [] });
+    expect(await readFile(configPath, "utf8")).not.toContain("notify");
+  });
+
+  it("保存 AI：同一服务保留 Key，更换服务不沿用旧 Key", async () => {
+    await post("/api/setup/ai", { ai: { provider: "claude", model: "claude-sonnet-5-5" } });
+    let text = await readFile(configPath, "utf8");
+    expect(text).toContain(SECRET_KEY);
+    expect(text).toContain("claude-sonnet-5-5");
+
+    await post("/api/setup/ai", { ai: { provider: "local", model: "qwen3" } });
+    text = await readFile(configPath, "utf8");
+    expect(text).not.toContain(SECRET_KEY);
+    expect(text).toContain("provider: local");
+
+    await post("/api/setup/ai", { ai: null });
+    expect(await readFile(configPath, "utf8")).not.toMatch(/^ai:/m);
+  });
+
+  it("没有配置文件：状态提示需要设置，保存持仓后创建配置", async () => {
+    await rm(configPath);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const status: any = await (await fetch(base + "/api/status")).json();
+    expect(status.missing).toBe(true);
+    expect((await getSetup()).exists).toBe(false);
+
+    expect((await post("/api/setup/watchlist", { items: [{ symbol: "510300", basePrice: 4, position: 100 }] })).status).toBe(200);
+    const text = await readFile(configPath, "utf8");
+    expect(text).toContain("interval: 15m");
+    expect(text).toContain('symbol: "510300"');
+    expect((await getSetup()).exists).toBe(true);
+  });
+
+  it("行情查询", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { quotes }: any = await (await fetch(base + "/api/quote?symbols=510300,hk2800,!!")).json();
+    expect(quotes[0]).toMatchObject({ symbol: "sh510300", name: "沪深300ETF", price: 3.4 });
+    expect(quotes[1]).toMatchObject({ symbol: "hk02800" });
+    expect(quotes[2].error).toBeTruthy();
+  });
+
+  it("测试提醒 / AI：未配置时给出提示", async () => {
+    await writeFile(configPath, "watchlist:\n  - { symbol: 510300, basePrice: 4, position: 1 }\n");
+    expect(await (await post("/api/setup/test-notify", {})).json()).toEqual({ error: "还没有配置提醒渠道" });
+    expect(await (await post("/api/setup/test-ai", {})).json()).toEqual({ error: "还没有配置 AI" });
+  });
+});

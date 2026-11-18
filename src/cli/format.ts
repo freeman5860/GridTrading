@@ -20,7 +20,8 @@ const changeStyle = (x: number): Style => (x > 0 ? "red" : x < 0 ? "green" : "gr
 function signalLine(sig: Signal, cur: string) {
   const tag = sig.action === "buy" ? s(["bold", "red"], "买入") : s(["bold", "green"], "卖出");
   const layer = s("gray", sig.layer === "tier" ? "[分档]" : "[网格]");
-  return `  ${tag} ${s("bold", String(sig.quantity))} @ ${num(sig.price)}  ≈ ${money(sig.amount, cur)}  ${layer} ${sig.reason}`;
+  const cny = sig.amountCny !== undefined ? s("gray", `（约 ${money(sig.amountCny, "元")}）`) : "";
+  return `  ${tag} ${s("bold", String(sig.quantity))} @ ${num(sig.price)}  ≈ ${money(sig.amount, cur)}${cny}  ${layer} ${sig.reason}`;
 }
 
 export function formatItem(item: CheckItem): string {
@@ -42,7 +43,7 @@ export function formatItem(item: CheckItem): string {
   lines.push(
     `  现价 ${s("bold", num(quote.price))} ${cur}  基准价 ${num(ev.basePrice)}  ` +
       `相对基准 ${s(changeStyle(ev.change), formatPct(ev.change))}  ` +
-      s("gray", `${MARKETS[quote.market].name} · 每手 ${quote.lotSize} · ${quote.time}`),
+      s("gray", `${holding.connect ? "港股通" : MARKETS[quote.market].name} · 每手 ${quote.lotSize} · ${quote.time}`),
   );
 
   if (ev.signals.length) {

@@ -21,6 +21,9 @@ const money = (n: number) => n.toLocaleString("zh-CN", { maximumFractionDigits: 
 const actionText = (s: Signal) => (s.action === "buy" ? "买入" : "卖出");
 const itemName = (i: CheckItem) => i.quote?.name ?? i.holding.name ?? i.holding.symbol;
 
+const marketLabel = (i: CheckItem) => (i.holding.connect ? "港股通" : MARKETS[i.quote!.market].name);
+const cny = (s: Signal) => (s.amountCny !== undefined ? `（约 ${money(s.amountCny)} 元）` : "");
+
 export function signalItems(result: CheckResult): CheckItem[] {
   return result.items.filter((i) => i.evaluation && i.evaluation.signals.length > 0);
 }
@@ -44,10 +47,10 @@ export function renderSignalEmail(result: CheckResult, opts: { comment?: string;
       const ev = i.evaluation!;
       const q = i.quote!;
       return [
-        `■ ${itemName(i)}（${i.holding.symbol}，${MARKETS[q.market].name}）`,
+        `■ ${itemName(i)}（${i.holding.symbol}，${marketLabel(i)}）`,
         `  现价 ${num(q.price)} ${q.currency}，基准价 ${num(ev.basePrice)}，相对基准 ${formatPct(ev.change)}`,
         ...ev.signals.map(
-          (s) => `  ${actionText(s)} ${s.quantity} @ ${num(s.price)}，约 ${money(s.amount)} ${q.currency}（${s.reason}）`,
+          (s) => `  ${actionText(s)} ${s.quantity} @ ${num(s.price)}，约 ${money(s.amount)} ${q.currency}${cny(s)}（${s.reason}）`,
         ),
         `  执行后预计持仓：${i.holding.position} → ${ev.positionAfter}，成交后请更新配置中的 position`,
         ...ev.notes.filter((n) => n.level === "warn").map((n) => `  ⚠ ${n.text}`),
@@ -68,7 +71,7 @@ export function renderSignalEmail(result: CheckResult, opts: { comment?: string;
   <td style="padding:6px 8px;border-bottom:1px solid #eee;color:${color};font-weight:600;white-space:nowrap">${actionText(s)}</td>
   <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;font-weight:600">${s.quantity}</td>
   <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right">${num(s.price)}</td>
-  <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;white-space:nowrap">${money(s.amount)} ${q.currency}</td>
+  <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;white-space:nowrap">${money(s.amount)} ${q.currency}${s.amountCny !== undefined ? `<div style="color:#888;font-size:12px">约 ${money(s.amountCny)} 元</div>` : ""}</td>
   <td style="padding:6px 8px;border-bottom:1px solid #eee;color:#555">${s.layer === "tier" ? "分档" : "网格"} · ${esc(s.reason)}</td>
 </tr>`;
       })
@@ -79,7 +82,7 @@ export function renderSignalEmail(result: CheckResult, opts: { comment?: string;
       .join("");
     const chgColor = ev.change > 0 ? "#d6332b" : ev.change < 0 ? "#1a8f4c" : "#555";
     return `<div style="border:1px solid #e5e7eb;border-radius:10px;padding:14px 16px;margin:0 0 14px">
-  <div style="font-size:16px;font-weight:600">${esc(itemName(i))} <span style="color:#888;font-weight:400;font-size:13px">${esc(i.holding.symbol)} · ${MARKETS[q.market].name}</span></div>
+  <div style="font-size:16px;font-weight:600">${esc(itemName(i))} <span style="color:#888;font-weight:400;font-size:13px">${esc(i.holding.symbol)} · ${marketLabel(i)}</span></div>
   <div style="margin:6px 0 10px;color:#444;font-size:14px">现价 <b>${num(q.price)}</b> ${q.currency} · 基准价 ${num(ev.basePrice)} · 相对基准 <b style="color:${chgColor}">${formatPct(ev.change)}</b></div>
   <table style="border-collapse:collapse;width:100%;font-size:14px">
     <tr style="background:#f6f7f9;color:#666"><th style="padding:6px 8px;text-align:left">操作</th><th style="padding:6px 8px;text-align:right">数量</th><th style="padding:6px 8px;text-align:right">参考价</th><th style="padding:6px 8px;text-align:right">金额</th><th style="padding:6px 8px;text-align:left">规则</th></tr>

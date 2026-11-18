@@ -162,6 +162,18 @@ program
         const sigs = ctx.evaluation.signals;
         console.log(gray(`规则引擎：${sigs.length ? sigs.map((s) => `${s.action === "buy" ? "买入" : "卖出"} ${s.quantity} @ ${s.price}`).join("，") : "不操作"}`));
       }
+      if (ctx.portfolio) {
+        console.log(gray(`没有指定标的，分析配置中的全部 ${ctx.portfolio.length} 个持仓：`));
+        for (const i of ctx.portfolio) {
+          const sigs = i.evaluation?.signals ?? [];
+          const what = i.evaluation
+            ? sigs.length
+              ? sigs.map((s) => `${s.action === "buy" ? "买入" : "卖出"} ${s.quantity} @ ${s.price}`).join("，")
+              : "不操作"
+            : (i.error ?? i.skipped);
+          console.log(gray(`  ${i.quote?.name ?? i.holding.symbol}：${what}`));
+        }
+      }
       for (const p of ctx.problems) console.log(gray(`说明：${p}`));
       console.log("");
 
@@ -198,7 +210,9 @@ program
   .option("--host <host>", "监听地址；默认只允许本机访问，局域网访问用 0.0.0.0（注意安全）", "127.0.0.1")
   .action(async (opts: { port: string; host: string }) => {
     const configPath = program.opts<{ config: string }>().config;
-    await loadConfig(configPath); // 先校验配置，有错误直接提示
+    // 先校验配置，有错误直接提示；还没有配置文件时可以在网页上按向导创建
+    const exists = await access(configPath).then(() => true, () => false);
+    if (exists) await loadConfig(configPath);
     const port = Number(opts.port);
     if (!Number.isInteger(port) || port <= 0 || port > 65535) fail(`端口无效：${opts.port}`);
     try {
@@ -209,6 +223,7 @@ program
     }
     const shown = opts.host === "0.0.0.0" || opts.host === "::" ? "localhost" : opts.host.includes(":") ? `[${opts.host}]` : opts.host;
     console.log(`控制台已启动：http://${shown}:${port}  （Ctrl+C 退出）`);
+    if (!exists) console.log(`还没有配置文件 ${configPath}：在浏览器中打开控制台，按向导设置持仓、提醒渠道和 AI。`);
     if (!["127.0.0.1", "localhost", "::1"].includes(opts.host)) {
       console.log("⚠ 当前允许其他设备访问。控制台可以修改配置文件并调用 AI（产生费用），请只在可信的网络中使用。");
     }

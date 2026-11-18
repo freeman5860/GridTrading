@@ -4,18 +4,24 @@
 // 安全：默认只监听 127.0.0.1；校验 Host（防 DNS 重绑定）和 Origin（防 CSRF）；接口从不返回密钥。
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
+import path from "node:path";
 import { createRequire } from "node:module";
 import { analyzePrompt, analyzeSystemPrompt, loadRulesText, MAX_IMAGES } from "../ai/analyze.js";
-import { createAIClient, errorMessage, PROVIDER_INFO, type ImageInput } from "../ai/providers.js";
+import { complete, createAIClient, errorMessage, PROVIDER_INFO, type ImageInput } from "../ai/providers.js";
 import { prepareAnalysis } from "../ai/run.js";
 import { prepareCheck } from "../check.js";
 import { ConfigError, loadConfig, updateHoldingInFile, type Config, type HoldingPatch } from "../config.js";
 import { MARKETS, normalizeSymbol } from "../core/symbol.js";
+import type { Quote } from "../core/types.js";
 import { describeSessions, isMarketOpen, localTime, nextOpen } from "../market/hours.js";
 import { ALL_MARKETS, describeNextOpen } from "../scheduler.js";
 import { channelName } from "../notify/webhook.js";
 import { loadState, saveState } from "../state.js";
+import { getQuoteSource } from "../market/source.js";
+import { renderTestEmail } from "../notify/render.js";
+import { notifierFor } from "../scheduler.js";
+import { readSetup, saveAI, saveNotify, saveWatchlist } from "./setup.js";
 
 export interface ServeOptions {
   configPath: string;
@@ -30,6 +36,7 @@ const STATIC: Record<string, { file: URL | string; type: string }> = {
   "/lib.js": { file: new URL("lib.js", WEB_DIR), type: "text/javascript; charset=utf-8" },
   "/watch.js": { file: new URL("watch.js", WEB_DIR), type: "text/javascript; charset=utf-8" },
   "/ai.js": { file: new URL("ai.js", WEB_DIR), type: "text/javascript; charset=utf-8" },
+  "/setup.js": { file: new URL("setup.js", WEB_DIR), type: "text/javascript; charset=utf-8" },
   "/style.css": { file: new URL("style.css", WEB_DIR), type: "text/css; charset=utf-8" },
   "/vendor/marked.js": {
     file: createRequire(import.meta.url).resolve("marked"),
@@ -129,6 +136,15 @@ async function handle(req: IncomingMessage, res: ServerResponse, opts: ServeOpti
   if (route === "GET /api/status") return sendJson(res, 200, await status(opts.configPath));
   if (route === "GET /api/rules") return sendJson(res, 200, { markdown: await loadRulesText() });
   if (route === "POST /api/analyze") return analyze(req, res, opts.configPath);
+  if (route === "GET /api/quote") return sendJson(res, 200, await quote(opts.configPath, url.searchParams.get("symbols") ?? ""));
+
+  // 设置向导
+  if (route === "GET /api/setup") return sendJson(res, 200, await readSetup(opts.configPath));
+  if (route === "POST /api/setup/watchlist") return saved(res, saveWatchlist(opts.configPath, await readJson(req, 256 * 1024)));
+  if (route === "POST /api/setup/notify") return saved(res, saveNotify(opts.configPath, await readJson(req, 64 * 1024)));
+  if (route === "POST /api/setup/ai") return saved(res, saveAI(opts.configPath, await readJson(req, 64 * 1024)));
+  if (route === "POST /api/setup/test-notify") return sendJson(res, 200, await testNotify(opts.configPath));
+  if (route === "POST /api/setup/test-ai") return sendJson(res, 200, await testAI(opts.configPath));
 
   const m = url.pathname.match(/^\/api\/holdings\/([^/]+)(\/execute|\/reset)?$/);
   if (m && method === "POST") {
@@ -146,7 +162,6 @@ async function handle(req: IncomingMessage, res: ServerResponse, opts: ServeOpti
 
 /** 控制台首页数据：各市场状态 + 每个标的的行情与规则计算（试运行，不保存状态） */
 async function status(configPath: string) {
-  const config = await loadConfig(configPath);
   const now = new Date();
   const markets = ALL_MARKETS.map((m) => {
     const open = isMarketOpen(m, now);
@@ -159,6 +174,12 @@ async function status(configPath: string) {
       nextOpen: open ? undefined : describeNextOpen([{ market: m, at: nextOpen(m, now) }]),
     };
   });
+
+  // 还没有配置文件：前端引导用户完成设置
+  if (!(await access(configPath).then(() => true, () => false))) {
+    return { now: now.toISOString(), configPath: path.resolve(configPath), markets, missing: true };
+  }
+  const config = await loadConfig(configPath);
 
   let check: Awaited<ReturnType<typeof prepareCheck>>["result"] | undefined;
   let checkError: string | undefined;
@@ -272,7 +293,7 @@ async function analyze(req: IncomingMessage, res: ServerResponse, configPath: st
     send({ t: "meta", v: `${PROVIDER_INFO[client.provider].name} · ${client.model}` });
     const ctx = await prepareAnalysis(config, client, { symbol, text, images, signal: ac.signal });
     if (ctx.extraction) send({ t: "extracted", v: ctx.extraction });
-    send({ t: "engine", v: { holding: ctx.holding, quote: ctx.quote, evaluation: ctx.evaluation, problems: ctx.problems, source: ctx.source } });
+    send({ t: "engine", v: { holding: ctx.holding, quote: ctx.quote, evaluation: ctx.evaluation, portfolio: ctx.portfolio, problems: ctx.problems, source: ctx.source } });
     for await (const ev of client.stream({
       system: await analyzeSystemPrompt(),
       prompt: analyzePrompt(text, ctx, images.length),
@@ -289,6 +310,76 @@ async function analyze(req: IncomingMessage, res: ServerResponse, configPath: st
     }
   } finally {
     res.end();
+  }
+}
+
+async function saved(res: ServerResponse, p: Promise<void>) {
+  await p;
+  sendJson(res, 200, { ok: true });
+}
+
+/** 查询行情，用于设置向导中核对代码、填入现价 */
+async function quote(configPath: string, input: string) {
+  const inputs = input.split(",").map((s) => s.trim()).filter(Boolean).slice(0, 20);
+  if (!inputs.length) throw new HttpError(400, "缺少代码");
+  const source = await loadConfig(configPath).then((c) => c.market.source, () => undefined);
+  const parsed = inputs.map((i) => {
+    try {
+      return { input: i, symbol: normalizeSymbol(i).symbol };
+    } catch (e) {
+      return { input: i, error: (e as Error).message };
+    }
+  });
+  const symbols = parsed.flatMap((p) => (p.symbol ? [p.symbol] : []));
+  let quotes = new Map<string, Quote>();
+  if (symbols.length) {
+    try {
+      quotes = await getQuoteSource(source).fetchQuotes(symbols, { timeoutMs: 10_000 });
+    } catch (e) {
+      throw new HttpError(502, `获取行情失败：${(e as Error).message}`);
+    }
+  }
+  return {
+    quotes: parsed.map((p) => {
+      if (!p.symbol) return p;
+      const q = quotes.get(p.symbol);
+      return q
+        ? { input: p.input, symbol: p.symbol, name: q.name, price: q.price, currency: q.currency, market: q.market, lotSize: q.lotSize }
+        : { input: p.input, symbol: p.symbol, error: "未查到行情，请检查代码" };
+    }),
+  };
+}
+
+/** 向所有提醒渠道发送测试消息，逐个返回结果 */
+async function testNotify(configPath: string) {
+  const config = await loadConfig(configPath);
+  const notifier = notifierFor(config);
+  if (!notifier) throw new HttpError(400, "还没有配置提醒渠道");
+  const results = await Promise.allSettled(notifier.channels.map((c) => c.notifier.send(renderTestEmail())));
+  return {
+    results: results.map((r, i) => ({
+      channel: notifier.channels[i]!.name,
+      ok: r.status === "fulfilled",
+      error: r.status === "rejected" ? ((r.reason as Error)?.message ?? String(r.reason)) : undefined,
+    })),
+  };
+}
+
+/** 用一个很短的请求测试 AI 是否可用 */
+async function testAI(configPath: string) {
+  const config = await loadConfig(configPath);
+  if (!config.ai) throw new HttpError(400, "还没有配置 AI");
+  try {
+    const client = createAIClient(config.ai);
+    const reply = await complete(client, {
+      system: "你是连接测试助手。",
+      prompt: "请只回复四个字：连接成功",
+      effort: "low",
+      signal: AbortSignal.timeout(60_000),
+    });
+    return { ok: true, model: `${PROVIDER_INFO[client.provider].name} · ${client.model}`, reply: reply.trim().slice(0, 200) };
+  } catch (e) {
+    return { ok: false, error: errorMessage(e) };
   }
 }
 

@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -228,10 +228,46 @@ describe("分析流程", () => {
 
   it("信息不足时不计算，把问题交给 AI 说明", async () => {
     const c = await config();
-    const ai = fakeAI(JSON.stringify({ symbol: null, missing: ["持仓成本"] }));
+    vi.spyOn(tencentSource, "fetchQuotes").mockResolvedValue(new Map());
+    const ai = fakeAI(JSON.stringify({ symbol: "usZZZZ", missing: ["持仓成本"] }));
     const ctx = await prepareAnalysis(c, ai, { text: "我该卖吗", images: [] });
     expect(ctx.evaluation).toBeUndefined();
     expect(analyzePrompt("我该卖吗", ctx, 0)).toContain("无法完整计算的原因");
+  });
+
+  it("没有提到任何标的时，分析配置中的全部持仓（使用已触发档位）", async () => {
+    const c = await config("  - { symbol: hk02800, basePrice: 20, position: 5000 }\n");
+    await saveState(c.statePath, { version: 1, symbols: { sh510300: { basePrice: 4, triggered: ["down15"] } } });
+    vi.spyOn(tencentSource, "fetchQuotes").mockResolvedValue(
+      new Map([
+        ["sh510300", q("sh510300", 3.4)],
+        ["hk02800", q("hk02800", 17, { market: "hk", name: "盈富基金", lotSize: 500, currency: "HKD" })],
+      ]),
+    );
+    const ai = fakeAI(JSON.stringify({ symbol: null, name: null, missing: ["证券代码"] }));
+    const ctx = await prepareAnalysis(c, ai, { text: "明天可以加仓吗？", images: [] });
+
+    expect(ctx.source).toBe("config");
+    expect(ctx.extraction).toBeUndefined();
+    expect(ctx.portfolio?.map((i) => i.holding.symbol)).toEqual(["sh510300", "hk02800"]);
+    expect(ctx.portfolio?.[0]!.evaluation?.signals).toEqual([]); // −15% 已触发过
+    expect(ctx.portfolio?.[1]!.evaluation?.signals[0]).toMatchObject({ action: "buy", quantity: 500 }); // 盈富 −15%，按手取整
+
+    const prompt = analyzePrompt("明天可以加仓吗？", ctx, 0);
+    expect(prompt).toContain("全部持仓");
+    expect(prompt).toContain("盈富基金 hk02800");
+    expect(prompt).toContain("下一触发价");
+    expect(prompt).not.toContain("无法完整计算");
+    // 只做试运行，不保存状态
+    expect(JSON.parse(await readFile(c.statePath, "utf8")).symbols.hk02800).toBeUndefined();
+  });
+
+  it("文字中写了代码时不走全部持仓", async () => {
+    const c = await config();
+    vi.spyOn(tencentSource, "fetchQuotes").mockResolvedValue(new Map([["sh510300", q("sh510300", 3.4)]]));
+    const ai = fakeAI(JSON.stringify({ symbol: null, name: null }));
+    const ctx = await prepareAnalysis(c, ai, { text: "510300 明天可以加仓吗", images: [] });
+    expect(ctx.portfolio).toBeUndefined();
   });
 
   it("没有任何输入时报错", async () => {

@@ -30,6 +30,8 @@ const holdingSchema = z
     basePrice: positive,
     position: z.number().min(0),
     cash: z.number().min(0).optional(),
+    /** 港股通：cash 和手续费为人民币 */
+    connect: z.boolean().optional(),
     tiers: z.boolean().optional(),
     grid: z
       .object({
@@ -45,7 +47,12 @@ const holdingSchema = z
   })
   .transform((h, ctx): Holding => {
     try {
-      return { ...h, symbol: normalizeSymbol(h.symbol).symbol };
+      const { symbol, market } = normalizeSymbol(h.symbol);
+      if (h.connect && market !== "hk") {
+        ctx.addIssue({ code: "custom", path: ["connect"], message: `${h.symbol} 不是港股，不能设置 connect（港股通）` });
+        return z.NEVER;
+      }
+      return { ...h, symbol };
     } catch (e) {
       ctx.addIssue({ code: "custom", path: ["symbol"], message: (e as SymbolError).message });
       return z.NEVER;
@@ -270,6 +277,7 @@ watchlist:
     basePrice: 24.5
     position: 2000
     cash: 30000            # 港币
+    # connect: true        # 通过港股通买入时打开：cash 和手续费改为人民币，按实时汇率折算；价格仍为港元
 
   # 美股：同时启用第二层区间小网格
   - symbol: usQQQ          # 也可写 QQQ

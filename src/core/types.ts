@@ -47,8 +47,10 @@ export interface Holding {
   basePrice: number;
   /** 当前持仓数量（股/份），交易后由用户更新 */
   position: number;
-  /** 该标的可用资金（与标的同币种），不填视为不限制 */
+  /** 该标的可用资金（与标的同币种；港股通为人民币），不填视为不限制 */
   cash?: number;
+  /** 港股通买入的港股：价格仍为港元，可用资金 cash 和手续费为人民币 */
+  connect?: boolean;
   /** 是否启用第一层分档仓位管理，默认 true */
   tiers?: boolean;
   /** 第二层区间小网格，不填则不启用 */
@@ -86,6 +88,8 @@ export interface Signal {
   /** 参考价格：分档信号为现价，网格信号为该格挂单价 */
   price: number;
   amount: number;
+  /** 港股通：按汇率折算的人民币金额（约数） */
+  amountCny?: number;
   ruleId: string;
   reason: string;
 }
@@ -109,4 +113,14 @@ export interface Evaluation {
   nextTiers: { up?: { id: TierId; price: number }; down?: { id: TierId; price: number } };
   grid?: { levels: number[]; anchor: number; lots: number; nextBuy?: number; nextSell?: number };
   nextState: SymbolState;
+  /** 港股通使用的汇率（1 港元 = rate 人民币） */
+  fx?: FxRate;
+}
+
+/** 港元兑人民币汇率 */
+export interface FxRate {
+  /** 1 港元 = rate 人民币（中间价） */
+  rate: number;
+  /** 汇率时间 */
+  time?: string;
 }

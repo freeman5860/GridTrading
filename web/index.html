@@ -22,6 +22,7 @@
           <button role="tab" data-tab="watch" aria-selected="true">监控</button>
           <button role="tab" data-tab="ai" aria-selected="false">AI 分析</button>
           <button role="tab" data-tab="rules" aria-selected="false">规则</button>
+          <button role="tab" data-tab="setup" aria-selected="false">设置</button>
         </nav>
       </div>
     </header>
@@ -80,6 +81,21 @@
       <!-- 规则 -->
       <section id="tab-rules" class="tab-panel" hidden>
         <article id="rules" class="panel md"><p class="muted">加载中…</p></article>
+      </section>
+
+      <!-- 设置向导 -->
+      <section id="tab-setup" class="tab-panel" hidden>
+        <div class="panel">
+          <div class="setup-head">
+            <div>
+              <h1 class="h1">设置向导</h1>
+              <p id="setup-intro" class="muted small">三步完成：填写持仓 → 选择提醒渠道 → 接入 AI。每一步都可以跳过，之后随时回来修改。</p>
+            </div>
+          </div>
+          <ol id="stepper" class="stepper"></ol>
+        </div>
+        <div id="setup-notice"></div>
+        <div id="setup-body"><p class="muted">加载中…</p></div>
       </section>
 
       <footer class="muted small center">规则信号由代码机械计算，AI 内容仅供参考，均不构成投资建议。市场有风险，投资需谨慎。</footer>

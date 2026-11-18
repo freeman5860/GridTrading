@@ -190,9 +190,10 @@ export function stateFromTriggered(holding: Holding, triggered?: string[] | null
 /** 把引擎结果写成给 AI 看的简明文本 */
 export function describeEvaluation(holding: Holding, quote: Pick<Quote, "price" | "lotSize" | "currency" | "market" | "time"> | undefined, ev: Evaluation): string {
   const lines = [
-    `标的：${holding.name ?? ""} ${holding.symbol}${quote ? `（${MARKETS[quote.market].name}，每手 ${quote.lotSize}，${quote.currency}）` : ""}`,
+    `标的：${holding.name ?? ""} ${holding.symbol}${quote ? `（${holding.connect ? "港股通买入的港股" : MARKETS[quote.market].name}，每手 ${quote.lotSize}，价格单位 ${quote.currency}）` : ""}`,
     `现价 ${ev.price}${quote?.time ? `（行情时间 ${quote.time}）` : ""}，基准价 ${ev.basePrice}，相对基准 ${formatPct(ev.change)}`,
-    `当前持仓 ${holding.position}${holding.cash !== undefined ? `，可用资金 ${holding.cash}` : "，可用资金未知"}`,
+    `当前持仓 ${holding.position}${holding.cash !== undefined ? `，可用资金 ${holding.cash}${holding.connect ? " 人民币" : ""}` : "，可用资金未知"}`,
+    ...(ev.fx ? [`港元兑人民币汇率 ${ev.fx.rate}（港股通买入按约高 3% 的参考汇率冻结资金，实际以结算汇率为准）`] : []),
   ];
   if (holding.grid) {
     const g = holding.grid;
@@ -201,7 +202,7 @@ export function describeEvaluation(holding: Holding, quote: Pick<Quote, "price" 
   if (ev.signals.length) {
     lines.push("规则引擎给出的操作：");
     for (const s of ev.signals) {
-      lines.push(`- ${s.action === "buy" ? "买入" : "卖出"} ${s.quantity} @ ${s.price}，约 ${s.amount}（${s.layer === "tier" ? "分档" : "网格"}：${s.reason}）`);
+      lines.push(`- ${s.action === "buy" ? "买入" : "卖出"} ${s.quantity} @ ${s.price}，约 ${s.amount}${s.amountCny !== undefined ? `（约人民币 ${s.amountCny}）` : ""}（${s.layer === "tier" ? "分档" : "网格"}：${s.reason}）`);
     }
     lines.push(`执行后预计持仓 ${ev.positionAfter}`);
   } else {
@@ -230,6 +231,7 @@ ${await loadRulesText()}
 2. 你的工作是：用通俗的语言解释为什么这样操作；对照规则的"适用条件"判断这个标的和当前行情是否适合做网格（如能从截图看出单边上涨/下跌趋势，要明确指出）；指出风险和需要用户确认的地方。
 3. 如果没有 <engine_result>（关键信息缺失），简要列出需要补充的信息；如需举例，只用一两句明确标注"假设"的话说明与用户最相关的规则，不要展开完整推演，不得编造用户的真实数据。
 4. 截图识别出的数据可能有误，提醒用户核对 <extracted> 中的数字。
+5. 如果 <engine_result> 中有多个标的（用户没有指定标的），针对用户的问题逐个标的给出简短结论，有交易信号的放在前面；对没有信号的标的，说明价格到多少会触发下一次加仓 / 止盈（用"下一触发价"）。多个标的时总长度可放宽到 800 字。
 
 输出使用简洁的 Markdown（中文），总长度尽量控制在 500 字以内，依次包含：
 ## 结论
@@ -245,6 +247,8 @@ export interface AnalysisContext {
   quote?: Quote;
   evaluation?: Evaluation;
   extraction?: Extraction;
+  /** 用户没有指定标的时：配置中全部持仓的引擎结果 */
+  portfolio?: CheckItem[];
   problems: string[];
   /** holding 来源：配置文件中的 watchlist，或从截图/文字中提取 */
   source: "config" | "extracted" | "none";
@@ -259,6 +263,18 @@ export function analyzePrompt(userText: string | undefined, ctx: AnalysisContext
     parts.push(
       `<engine_result source="${ctx.source === "config" ? "用户配置文件中的持仓" : "从截图/文字提取的持仓"}">\n` +
         describeEvaluation(ctx.holding, ctx.quote, ctx.evaluation) +
+        "\n</engine_result>",
+    );
+  }
+  if (ctx.portfolio?.length) {
+    const blocks = ctx.portfolio.map((i) => {
+      const named = { ...i.holding, name: i.quote?.name ?? i.holding.name };
+      if (i.evaluation) return describeEvaluation(named, i.quote, i.evaluation);
+      return `标的：${named.name ?? ""} ${i.holding.symbol}\n无法计算：${i.error ?? i.skipped ?? "未知原因"}`;
+    });
+    parts.push(
+      `<engine_result source="用户配置文件中的全部持仓（用户没有指定标的，共 ${ctx.portfolio.length} 个）">\n` +
+        blocks.join("\n\n") +
         "\n</engine_result>",
     );
   }

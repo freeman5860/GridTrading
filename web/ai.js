@@ -68,7 +68,17 @@ function renderExtracted(x) {
   $("#ai-facts").append(...(facts.length ? facts : ["未识别到持仓信息"]).map((f) => fact(f)));
 }
 
+const describeSignals = (sigs) =>
+  sigs.length ? sigs.map((s) => `${s.action === "buy" ? "买入" : "卖出"} ${s.quantity} @ ${num(s.price)}`).join("，") : "不操作";
+
 function renderEngine(v) {
+  if (v.portfolio) {
+    $("#ai-facts").append(fact(`未指定标的，分析配置中的全部 ${v.portfolio.length} 个持仓`));
+    for (const i of v.portfolio) {
+      const name = i.quote?.name ?? i.holding.name ?? i.holding.symbol;
+      $("#ai-facts").append(fact(`${name}：${i.evaluation ? describeSignals(i.evaluation.signals) : (i.error ?? i.skipped)}`, "engine"));
+    }
+  }
   if (v.evaluation) {
     const sigs = v.evaluation.signals;
     $("#ai-facts").append(
@@ -164,6 +174,7 @@ async function submit() {
 export function updateSymbols(status) {
   const select = $("#ai-symbol");
   const current = select.value;
+  if (status.missing) return;
   const items = status.check?.items ?? [];
   select.replaceChildren(
     h("option", { value: "" }, "自动识别"),
@@ -171,7 +182,11 @@ export function updateSymbols(status) {
   );
   select.value = items.some((i) => i.holding.symbol === current) ? current : "";
   const ai = status.settings.ai;
-  $("#ai-provider").textContent = ai ? `当前模型：${ai.name} · ${ai.model}（在配置文件的 ai 段修改）` : "未配置 AI：请在配置文件中添加 ai 段（provider、apiKey）后重启 serve";
+  $("#ai-provider").replaceChildren(
+    ai ? `当前模型：${ai.name} · ${ai.model}（` : "还没有配置 AI：",
+    h("a", { href: "#setup" }, ai ? "在设置中修改" : "去设置"),
+    ai ? "）" : "",
+  );
   $("#ai-submit").disabled = !ai || controller !== null;
 }
 

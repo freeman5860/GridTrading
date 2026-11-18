@@ -1,3 +1,4 @@
+import { fetchFx, prepareCheck } from "../check.js";
 import type { Config } from "../config.js";
 import { evaluate } from "../core/engine.js";
 import { MARKETS, normalizeSymbol } from "../core/symbol.js";
@@ -43,6 +44,11 @@ export async function prepareAnalysis(config: Config, client: AIClient, input: A
   } else if (hasInput) {
     extraction = await extractHolding(client, input);
 
+    // 截图/文字里没有提到任何标的（如"明天可以加仓吗"）：按配置中的全部持仓分析
+    if (!symbol && !extraction.symbol && !extraction.name && !codesInText(input.text).length) {
+      return portfolioContext(config, input.signal);
+    }
+
     // 没识别出代码但有名称：按名称匹配 watchlist（用行情里的证券名称），唯一匹配时使用配置中的持仓
     if (!symbol && !extraction.symbol && extraction.name) {
       const match = await matchWatchlistByName(config, extraction.name, input.signal);
@@ -69,6 +75,16 @@ export async function prepareAnalysis(config: Config, client: AIClient, input: A
 
   if (!holding) return { extraction, problems, source };
   return finish(config, holding, state, extraction, problems, source, input.signal);
+}
+
+/** 配置中全部持仓的引擎结果（试运行，不保存状态，使用已触发档位） */
+async function portfolioContext(config: Config, signal?: AbortSignal): Promise<AnalysisContext> {
+  try {
+    const { result } = await prepareCheck(config, { signal });
+    return { portfolio: result.items, problems: [], source: "config" };
+  } catch (e) {
+    return { problems: [`获取实时行情失败：${(e as Error).message}`], source: "none" };
+  }
 }
 
 /** 从用户文字中找出明确的证券代码：6 位数字、hk + 数字、us + 字母、或 0700.HK 这类写法 */
@@ -154,6 +170,7 @@ async function finish(
   if (!quote) problems.push("未获取到实时行情，使用截图中识别的现价");
 
   const market = normalizeSymbol(holding.symbol).market;
-  const evaluation = evaluate(holding, { price, lotSize: quote?.lotSize ?? MARKETS[market].defaultLot }, state);
+  const fx = holding.connect ? await fetchFx(signal) : undefined;
+  const evaluation = evaluate(holding, { price, lotSize: quote?.lotSize ?? MARKETS[market].defaultLot }, state, { fx });
   return { holding, quote, evaluation, extraction, problems, source };
 }

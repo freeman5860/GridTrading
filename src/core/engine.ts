@@ -3,6 +3,7 @@
 
 import type {
   Evaluation,
+  FxRate,
   GridConfig,
   GridState,
   Holding,
@@ -50,7 +51,52 @@ export function initialState(holding: Holding): SymbolState {
   return { basePrice: holding.basePrice, triggered: [] };
 }
 
-export function evaluate(holding: Holding, quote: Pick<Quote, "price" | "lotSize">, prev?: SymbolState): Evaluation {
+/**
+ * 港股通买入时按"买入参考汇率"冻结资金，比中间价高约 3%，资金是否足够按这个汇率保守估算。
+ * （卖出参考汇率约低 3%，实际以交收日结算汇率为准）
+ */
+export const CONNECT_FX_BUFFER = 0.03;
+
+export interface EvaluateOptions {
+  /** 港股通标的需要的港元兑人民币汇率 */
+  fx?: FxRate;
+}
+
+export function evaluate(holding: Holding, quote: Pick<Quote, "price" | "lotSize">, prev?: SymbolState, opts: EvaluateOptions = {}): Evaluation {
+  if (holding.connect) return evaluateConnect(holding, quote, prev, opts.fx);
+  return evaluateLocal(holding, quote, prev);
+}
+
+/** 港股通：人民币资金和手续费折算成港元后计算，信号附带人民币金额 */
+function evaluateConnect(holding: Holding, quote: Pick<Quote, "price" | "lotSize">, prev: SymbolState | undefined, fx: FxRate | undefined): Evaluation {
+  const extra: Note[] = [];
+  let local: Holding = { ...holding };
+  if (fx && fx.rate > 0) {
+    const buyRate = fx.rate * (1 + CONNECT_FX_BUFFER);
+    if (holding.cash !== undefined) {
+      local.cash = holding.cash / buyRate;
+      extra.push({
+        level: "info",
+        text: `港股通：可用资金 ${round(holding.cash, 2)} 元按买入参考汇率约 ${round(buyRate)} 折合 ${round(local.cash, 2)} 港元`,
+      });
+    }
+    if (holding.fee) local.fee = { ...holding.fee, min: holding.fee.min / fx.rate };
+  } else {
+    if (holding.cash !== undefined) {
+      local = { ...local, cash: undefined };
+      extra.push({ level: "warn", text: "港股通：没有获取到港元汇率，本次不按可用资金（人民币）限制买入数量，请自行核对资金" });
+    }
+  }
+  const ev = evaluateLocal(local, quote, prev);
+  ev.notes.push(...extra);
+  if (fx && fx.rate > 0) {
+    ev.fx = fx;
+    for (const s of ev.signals) s.amountCny = round(s.amount * fx.rate * (s.action === "buy" ? 1 + CONNECT_FX_BUFFER : 1 - CONNECT_FX_BUFFER), 2);
+  }
+  return ev;
+}
+
+function evaluateLocal(holding: Holding, quote: Pick<Quote, "price" | "lotSize">, prev?: SymbolState): Evaluation {
   const notes: Note[] = [];
   const signals: Signal[] = [];
   const lot = quote.lotSize > 0 ? quote.lotSize : 1;
