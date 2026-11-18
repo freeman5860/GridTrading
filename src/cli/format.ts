@@ -32,6 +32,10 @@ export function formatItem(item: CheckItem): string {
     lines.push(s("yellow", `  ⚠ ${item.error}`));
     return lines.join("\n");
   }
+  if (item.skipped) {
+    lines.push(s("gray", `  跳过：${item.skipped}`));
+    return lines.join("\n");
+  }
   if (!quote || !ev) return lines.join("\n");
 
   const cur = quote.currency;

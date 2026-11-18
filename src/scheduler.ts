@@ -1,0 +1,143 @@
+// 定时运行：交易时段内按间隔检查，有交易信号时发邮件。
+// 每次检查前重新读取配置，交易后修改 position 不需要重启进程。
+
+import { setTimeout as sleep } from "node:timers/promises";
+import { prepareCheck, type CheckResult } from "./check.js";
+import { loadConfig, type Config } from "./config.js";
+import { MARKETS, marketOf } from "./core/symbol.js";
+import type { Market } from "./core/types.js";
+import { isMarketOpen, localTime, nextOpen } from "./market/hours.js";
+import { createEmailNotifier, type Notifier } from "./notify/email.js";
+import { renderSignalEmail, signalItems, type RenderedEmail } from "./notify/render.js";
+import { emailComment } from "./ai/analyze.js";
+import { createAIClient, describeAIError, PROVIDER_INFO, type AIClient } from "./ai/providers.js";
+
+export const ALL_MARKETS: Market[] = ["cn", "hk", "us"];
+
+export type TickOutcome =
+  | { status: "closed"; nextOpen: { market: Market; at: Date }[] }
+  | { status: "checked"; markets: Market[]; result: CheckResult; notified: boolean }
+  | { status: "notify-failed"; markets: Market[]; result: CheckResult; error: string };
+
+export interface TickDeps {
+  now?: Date;
+  /** 测试用：替换邮件发送 */
+  notifier?: Notifier | null;
+  /** 测试用：替换 AI 客户端 */
+  ai?: AIClient | null;
+}
+
+/** 配置中需要监控、且有标的的市场 */
+export function watchedMarkets(config: Config): Market[] {
+  const configured = config.schedule.markets ?? ALL_MARKETS;
+  const present = new Set(config.watchlist.map((h) => marketOf(h.symbol)));
+  return configured.filter((m) => present.has(m));
+}
+
+export function notifierFor(config: Config): Notifier | null {
+  return config.notify?.email ? createEmailNotifier(config.notify.email) : null;
+}
+
+export async function tick(config: Config, deps: TickDeps = {}): Promise<TickOutcome> {
+  const now = deps.now ?? new Date();
+  const watched = watchedMarkets(config);
+  const open = watched.filter((m) => isMarketOpen(m, now));
+  if (!open.length) {
+    return { status: "closed", nextOpen: watched.map((market) => ({ market, at: nextOpen(market, now) })) };
+  }
+
+  const prepared = await prepareCheck(config, { markets: open, requireFresh: true, now });
+  const { result } = prepared;
+  const notifier = deps.notifier === undefined ? notifierFor(config) : deps.notifier;
+  const shouldNotify = notifier && (result.signalCount > 0 || config.notify?.always);
+
+  let notified = false;
+  if (shouldNotify) {
+    try {
+      await notifier.send(await buildSignalEmail(config, result, deps.ai));
+      notified = true;
+    } catch (e) {
+      // 不保存状态：下次检查会重新产生这些信号并再次尝试发送，避免"每轮只提醒一次"的信号丢失
+      return { status: "notify-failed", markets: open, result, error: (e as Error).message };
+    }
+  }
+  await prepared.commit();
+  return { status: "checked", markets: open, result, notified };
+}
+
+/** 渲染信号邮件；开启 ai.emailComment 时附带 AI 点评，点评失败不影响发送 */
+export async function buildSignalEmail(config: Config, result: CheckResult, aiOverride?: AIClient | null): Promise<RenderedEmail> {
+  if (!config.ai?.emailComment || result.signalCount === 0) return renderSignalEmail(result);
+  try {
+    const client = aiOverride === undefined ? createAIClient(config.ai) : aiOverride;
+    if (!client) return renderSignalEmail(result);
+    const comment = await emailComment(client, signalItems(result), AbortSignal.timeout(120_000));
+    return renderSignalEmail(result, { comment, commentBy: `${PROVIDER_INFO[client.provider].name} · ${client.model}` });
+  } catch (e) {
+    return renderSignalEmail(result, { comment: `（AI 点评生成失败：${describeAIError(e)}）` });
+  }
+}
+
+export function describeNextOpen(list: { market: Market; at: Date }[]): string {
+  const days = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  return list
+    .map(({ market, at }) => {
+      const t = localTime(market, at);
+      const local = `${MARKETS[market].name} ${t.date.slice(5)} ${days[t.weekday]} ${t.hhmm}`;
+      if (market === "cn") return local;
+      const bj = localTime("cn", at); // A 股时区即北京时间
+      return `${local}（当地时间，北京时间 ${bj.date.slice(5)} ${bj.hhmm}）`;
+    })
+    .join("；");
+}
+
+export interface LoopOptions {
+  configPath: string;
+  signal: AbortSignal;
+  /** 覆盖配置中的间隔（毫秒） */
+  interval?: number;
+  log: (line: string) => void;
+  /** 每次检查完成后的回调（CLI 用来打印详情） */
+  onTick?: (outcome: TickOutcome) => void;
+}
+
+/** 下一个与间隔对齐的时间点（如 15 分钟间隔对齐到 :00 / :15 / :30 / :45） */
+export function nextBoundary(now: number, interval: number): number {
+  return Math.floor(now / interval) * interval + interval;
+}
+
+export async function runLoop(opts: LoopOptions): Promise<void> {
+  let config: Config | undefined;
+  let lastStatus: TickOutcome["status"] | undefined;
+
+  while (!opts.signal.aborted) {
+    try {
+      config = await loadConfig(opts.configPath);
+    } catch (e) {
+      if (!config) throw e;
+      opts.log(`⚠ 配置文件读取失败，继续使用上一次的配置：${(e as Error).message}`);
+    }
+
+    const interval = opts.interval ?? config.schedule.interval;
+    try {
+      const outcome = await tick(config);
+      if (outcome.status === "closed") {
+        // 休市期间只在状态变化时提示一次，避免刷屏
+        if (lastStatus !== "closed") opts.log(`休市中。下次开盘：${describeNextOpen(outcome.nextOpen)}`);
+      } else {
+        opts.onTick?.(outcome);
+      }
+      lastStatus = outcome.status;
+    } catch (e) {
+      lastStatus = undefined;
+      opts.log(`⚠ 本次检查失败，将在下次重试：${(e as Error).message}`);
+    }
+
+    const wait = nextBoundary(Date.now(), interval) - Date.now();
+    try {
+      await sleep(wait, undefined, { signal: opts.signal });
+    } catch {
+      break; // 收到退出信号
+    }
+  }
+}

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>gridbot 控制台</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="2" y="2" width="20" height="20" rx="5" class="brand-bg" />
+            <path d="M5 9h14M5 13h14M5 17h14" class="brand-grid" />
+            <path d="M5 15.5 9 10l3.5 4L19 7" class="brand-line" />
+          </svg>
+          <span>gridbot</span>
+        </div>
+        <nav class="tabs" role="tablist">
+          <button role="tab" data-tab="watch" aria-selected="true">监控</button>
+          <button role="tab" data-tab="ai" aria-selected="false">AI 分析</button>
+          <button role="tab" data-tab="rules" aria-selected="false">规则</button>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <!-- 监控 -->
+      <section id="tab-watch" class="tab-panel">
+        <div class="toolbar">
+          <div id="markets" class="markets"></div>
+          <div class="toolbar-right">
+            <span id="updated" class="muted small"></span>
+            <button id="refresh" class="btn">刷新</button>
+          </div>
+        </div>
+        <div id="summary" class="summary"></div>
+        <div id="holdings" class="holdings"><p class="muted">加载中…</p></div>
+        <p id="config-path" class="muted small center"></p>
+      </section>
+
+      <!-- AI 分析 -->
+      <section id="tab-ai" class="tab-panel" hidden>
+        <div class="panel">
+          <h1 class="h1">AI 分析</h1>
+          <p class="muted small">
+            上传或粘贴截图（持仓、行情、K 线），或输入文字。AI 识别持仓 → 规则引擎计算 → AI 解读。数量以规则引擎为准。
+          </p>
+          <div id="ai-provider" class="muted small"></div>
+          <textarea id="ai-text" rows="4" placeholder="例如：我持有沪深300ETF 10000 份，成本 4.8 元，账户还有 2 万现金（⌘/Ctrl + Enter 提交）"></textarea>
+          <div id="dropzone" class="dropzone">
+            <div id="thumbs" class="thumbs"></div>
+            <button id="pick" class="pick" type="button"><span class="plus">＋</span>上传 / 拖拽 / 粘贴截图</button>
+            <input id="file" type="file" accept="image/*" multiple hidden />
+          </div>
+          <label class="field-inline">
+            <span class="muted small">分析配置中的标的（可选）</span>
+            <select id="ai-symbol"><option value="">自动识别</option></select>
+          </label>
+          <div class="row">
+            <button id="ai-submit" class="btn primary">开始分析</button>
+            <button id="ai-stop" class="btn" hidden>停止</button>
+          </div>
+        </div>
+        <div id="ai-result" class="panel" hidden>
+          <div id="ai-meta" class="muted small"></div>
+          <div id="ai-facts" class="facts"></div>
+          <details id="ai-thinking" class="thinking" hidden>
+            <summary>思考过程</summary>
+            <div id="ai-thinking-text"></div>
+          </details>
+          <div id="ai-waiting" class="waiting" hidden><span class="dot"></span><span id="ai-waiting-text">正在识别持仓并计算…</span></div>
+          <article id="ai-answer" class="md"></article>
+          <div id="ai-error" class="error" hidden></div>
+        </div>
+      </section>
+
+      <!-- 规则 -->
+      <section id="tab-rules" class="tab-panel" hidden>
+        <article id="rules" class="panel md"><p class="muted">加载中…</p></article>
+      </section>
+
+      <footer class="muted small center">规则信号由代码机械计算，AI 内容仅供参考，均不构成投资建议。市场有风险，投资需谨慎。</footer>
+    </main>
+
+    <dialog id="dialog">
+      <form id="dialog-form" method="dialog">
+        <h2 id="dialog-title"></h2>
+        <div id="dialog-body"></div>
+        <div id="dialog-error" class="error" hidden></div>
+        <div class="row end">
+          <button value="cancel" formnovalidate class="btn">取消</button>
+          <button id="dialog-ok" value="ok" class="btn primary">确定</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

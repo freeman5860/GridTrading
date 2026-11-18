@@ -1,11 +1,12 @@
-import { readFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
 import { normalizeSymbol, SymbolError } from "./core/symbol.js";
-import type { GridStep, Holding } from "./core/types.js";
+import type { GridStep, Holding, Market } from "./core/types.js";
+import { emailConfigSchema } from "./notify/email.js";
 
-z.config(z.locales.zhCN());
+z.config(z.locales.zhCN()); // 校验错误信息使用中文
 
 export const DEFAULT_CONFIG = "gridbot.yaml";
 
@@ -50,14 +51,61 @@ const holdingSchema = z
     }
   });
 
+/** 解析时间间隔："30s" / "15m" / "1h"，纯数字按分钟；最少 1 分钟（避免频繁请求公开行情接口） */
+export function parseInterval(v: string | number): number {
+  if (typeof v === "number") return v * 60_000;
+  const m = v.trim().match(/^(\d+(?:\.\d+)?)\s*(s|m|h)?$/i);
+  if (!m) throw new Error(`时间间隔格式错误："${v}"，示例：30s、15m、1h`);
+  const unit = { s: 1_000, m: 60_000, h: 3_600_000 }[(m[2] ?? "m").toLowerCase() as "s" | "m" | "h"];
+  return Number(m[1]) * unit;
+}
+
+const intervalSchema = z.union([z.number().positive(), z.string()]).transform((v, ctx) => {
+  try {
+    const ms = parseInterval(v);
+    if (ms < 60_000) ctx.addIssue({ code: "custom", message: "检查间隔不能小于 1 分钟" });
+    return ms;
+  } catch (e) {
+    ctx.addIssue({ code: "custom", message: (e as Error).message });
+    return z.NEVER;
+  }
+});
+
+/** ${ENV} 替换后可能是空字符串，视为未填写 */
+const optionalString = z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? undefined : v), z.string().optional());
+
 const configSchema = z.object({
   market: z.object({ source: z.string().default("tencent") }).default({ source: "tencent" }),
   state: z.string().optional(),
   watchlist: z.array(holdingSchema).min(1, "watchlist 至少需要一个标的"),
-  // 后续步骤使用，这里先放行
-  ai: z.unknown().optional(),
-  notify: z.unknown().optional(),
-  schedule: z.unknown().optional(),
+  notify: z
+    .object({
+      email: emailConfigSchema.optional(),
+      /** 没有交易信号时也发邮件（默认只在有信号时发送） */
+      always: z.boolean().default(false),
+    })
+    .optional(),
+  schedule: z
+    .object({
+      /** 交易时段内的检查间隔 */
+      interval: intervalSchema.default(15 * 60_000),
+      /** 只监控这些市场，默认全部 */
+      markets: z.array(z.enum(["cn", "hk", "us"] satisfies Market[])).optional(),
+    })
+    .default({ interval: 15 * 60_000 }),
+  ai: z
+    .object({
+      provider: z.enum(["claude", "openai", "gemini"]),
+      apiKey: optionalString,
+      /** 仅 Claude：代理网关的 Bearer Token，可代替 apiKey */
+      authToken: optionalString,
+      model: optionalString,
+      /** 自定义 API 地址：代理，或 OpenAI 兼容服务（DeepSeek、通义千问、Kimi 等） */
+      baseURL: optionalString,
+      /** 信号邮件中附带 AI 点评 */
+      emailComment: z.boolean().default(false),
+    })
+    .optional(),
 });
 
 export type Config = z.infer<typeof configSchema> & { path: string; statePath: string };
@@ -108,6 +156,49 @@ export function parseConfig(text: string, configPath: string): Config {
   };
 }
 
+export interface HoldingPatch {
+  position?: number;
+  basePrice?: number;
+  /** null 表示删除该字段（不限制资金） */
+  cash?: number | null;
+}
+
+/**
+ * 修改配置文件中某个标的的字段，保留文件里的注释和格式。
+ * 写入前会用新内容完整校验一遍，校验不通过则不写入。
+ */
+export async function updateHoldingInFile(configPath: string, symbol: string, patch: HoldingPatch): Promise<Config> {
+  const text = await readFile(configPath, "utf8");
+  const doc = YAML.parseDocument(text);
+  const list = doc.get("watchlist");
+  if (!YAML.isSeq(list)) throw new ConfigError("配置文件中没有 watchlist 列表");
+
+  const index = list.items.findIndex((item) => {
+    if (!YAML.isMap(item)) return false;
+    const node = item.get("symbol", true);
+    const raw = YAML.isScalar(node) ? (node.source ?? String(node.value)) : undefined;
+    try {
+      return raw !== undefined && normalizeSymbol(String(raw)).symbol === symbol;
+    } catch {
+      return false;
+    }
+  });
+  if (index < 0) throw new ConfigError(`配置的 watchlist 中没有 ${symbol}`);
+
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue;
+    if (value === null) doc.deleteIn(["watchlist", index, key]);
+    else doc.setIn(["watchlist", index, key], value);
+  }
+  const next = doc.toString();
+  const config = parseConfig(next, configPath); // 校验失败会抛出 ConfigError，原文件不变
+
+  const tmp = `${configPath}.${process.pid}.tmp`;
+  await writeFile(tmp, next, "utf8");
+  await rename(tmp, configPath);
+  return config;
+}
+
 export async function loadConfig(configPath = process.env.GRIDBOT_CONFIG ?? DEFAULT_CONFIG): Promise<Config> {
   let text: string;
   try {
@@ -126,6 +217,29 @@ market:
 
 # 状态文件：记录每个标的已触发的档位和网格位置，默认与本文件同目录的 .gridbot/state.json
 # state: .gridbot/state.json
+
+# 定时运行（gridbot run）：只在各市场交易时段内检查
+schedule:
+  interval: 15m            # 检查间隔：30s / 15m / 1h，最少 1 分钟
+  # markets: [cn, hk, us]  # 只监控部分市场
+
+# 邮件提醒：有交易信号时发送（gridbot run / gridbot check --notify）
+# notify:
+#   email:
+#     host: smtp.qq.com    # QQ 邮箱；163 为 smtp.163.com，Gmail 为 smtp.gmail.com
+#     port: 465            # 465 为 SSL；587 为 STARTTLS
+#     user: you@qq.com
+#     pass: \${SMTP_PASS}   # QQ/163 邮箱填"授权码"，不是登录密码；Gmail 填应用专用密码
+#     to: you@qq.com       # 可以是列表：[a@x.com, b@y.com]
+#   always: false          # true 时没有信号也发送（不建议）
+
+# AI 分析（gridbot analyze）与邮件点评，可选
+# ai:
+#   provider: claude       # claude | openai | gemini
+#   apiKey: \${ANTHROPIC_API_KEY}   # openai 用 \${OPENAI_API_KEY}，gemini 用 \${GEMINI_API_KEY}
+#   model: claude-opus-5-5 # 不填使用默认模型（openai: gpt-5.5，gemini: gemini-3.8-flash）
+#   # baseURL: https://api.deepseek.com   # provider: openai 时可指向任意 OpenAI 兼容服务
+#   emailComment: false    # true 时信号邮件附带 AI 点评
 
 watchlist:
   # A 股场内 ETF：只用第一层分档仓位管理

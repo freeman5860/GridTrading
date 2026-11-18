@@ -1,0 +1,79 @@
+# gridbot 定时监控（GitHub Actions）
+#
+# 使用方法（详见 docs/github-actions.md）：
+#   1. Fork 本仓库
+#   2. Settings → Secrets and variables → Actions：
+#        Secrets：GRIDBOT_CONFIG（整份 gridbot.yaml 的内容）、SMTP_PASS，以及用到的 AI Key
+#        Variables：GRIDBOT_ENABLED = true
+#   3. Actions 页面启用 workflow，可以先手动运行一次（Run workflow）
+#
+# 持仓写在 Secret 里而不是仓库文件里：Fork 出来的仓库默认是公开的。
+
+name: gridbot
+
+on:
+  schedule:
+    # GitHub 的 cron 使用 UTC，且可能延迟几分钟到几十分钟。
+    # gridbot run --once 会按各市场真实交易时段（含美股夏令时）过滤，这里只需覆盖大致范围：
+    - cron: "*/15 1-8 * * 1-5" # 北京时间 09:00–16:59：A 股、港股
+    - cron: "*/15 13-21 * * 1-5" # 北京时间 21:00–05:59：美股（夏令时 / 冬令时）
+  workflow_dispatch: {}
+
+# 同一时间只运行一个，避免两次运行同时读写状态
+concurrency:
+  group: gridbot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: ${{ vars.GRIDBOT_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装并构建
+        run: npm ci && npm run build
+
+      - name: 写入配置
+        env:
+          GRIDBOT_CONFIG: ${{ secrets.GRIDBOT_CONFIG }}
+        run: |
+          if [ -z "$GRIDBOT_CONFIG" ]; then
+            echo "::error::没有设置 Secret GRIDBOT_CONFIG"
+            exit 1
+          fi
+          printf '%s\n' "$GRIDBOT_CONFIG" > gridbot.yaml
+          node dist/cli/index.js markets
+
+      # 已触发档位、网格位置等状态保存在 Actions 缓存中（每次保存为新的缓存，恢复最近一次）
+      - name: 恢复状态
+        uses: actions/cache/restore@v4
+        with:
+          path: .gridbot
+          key: gridbot-state-${{ github.run_id }}
+          restore-keys: gridbot-state-
+
+      - name: 检查并发送提醒
+        env:
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          NO_COLOR: "1"
+        run: node dist/cli/index.js run --once
+
+      - name: 保存状态
+        if: ${{ always() && hashFiles('.gridbot/state.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .gridbot
+          key: gridbot-state-${{ github.run_id }}

@@ -100,10 +100,11 @@ watchlist:
   it("替换 ${ENV} 变量", () => {
     process.env.GRIDBOT_TEST_SECRET = "s3cret";
     const c = yaml(`
-notify: { pass: "\${GRIDBOT_TEST_SECRET}" }
+notify:
+  email: { host: smtp.qq.com, user: a@qq.com, pass: "\${GRIDBOT_TEST_SECRET}", to: a@qq.com }
 watchlist: [{ symbol: sh510300, basePrice: 4, position: 0 }]
 `);
-    expect(c.notify).toEqual({ pass: "s3cret" });
+    expect(c.notify?.email?.pass).toBe("s3cret");
   });
 
   it("给出可读的校验错误", () => {
