@@ -11,7 +11,7 @@
 - **监控**：`gridbot run` 在各市场交易时段内定时检查，有信号时发邮件。
 - **控制台**：`gridbot serve` 启动本地网页，查看持仓和信号，成交后一键更新持仓，上传截图让 AI 分析。
 - **免服务器**：用 GitHub Actions 定时运行，见 [docs/github-actions.md](docs/github-actions.md)。
-- **AI**：支持 Claude / ChatGPT（含 OpenAI 兼容服务）/ Gemini，负责识别截图和解读信号，不参与计算。
+- **AI**：支持 Claude / ChatGPT（含 OpenAI 兼容服务）/ Gemini / 本地部署的模型（如 Ollama 上的 Qwen），负责识别截图和解读信号，不参与计算。
 
 ## 快速开始
 
@@ -115,7 +115,7 @@ gridbot run                # 开始监控（Ctrl+C 退出）
 
 ```yaml
 ai:
-  provider: claude         # claude | openai | gemini
+  provider: claude         # claude | openai | gemini | local
   apiKey: ${ANTHROPIC_API_KEY}
   # model: claude-opus-5-5 # 默认：claude-opus-5-5 / gpt-5.5 / gemini-3.8-flash
   # baseURL: https://api.deepseek.com   # 代理或 OpenAI 兼容服务
@@ -128,6 +128,27 @@ gridbot analyze 行情.png 持仓.png -t "成本 4 元，还有 2 万现金"
 gridbot analyze -t "我持有沪深300ETF 10000 份，成本 4.8 元"
 gridbot analyze -s hk00700 --thinking     # 显示思考过程
 ```
+
+#### 本地模型（Qwen 等）
+
+用 Ollama、LM Studio、vLLM、llama.cpp 等在本机或内网部署的模型，数据不出本地，也不产生 API 费用：
+
+```bash
+ollama pull qwen3:8b          # 文字分析
+ollama pull qwen2.5vl:7b      # 需要识别截图时用视觉模型
+```
+
+```yaml
+ai:
+  provider: local
+  model: qwen3:8b
+  # baseURL: http://127.0.0.1:11434/v1   # 默认 Ollama；LM Studio 为 :1234/v1，vLLM 为 :8000/v1
+  # apiKey: ...                          # 服务需要认证时才填
+```
+
+- 不需要 API Key；Qwen3、DeepSeek-R1 输出的 `<think>` 思考过程会单独显示。
+- 识别截图需要视觉模型（如 `qwen2.5vl`、`gemma3`），纯文字模型收到图片会提示更换。
+- 建议使用 7B/8B 及以上的模型。实测 1.7B 能跑通流程，但识别代码不稳定、解读质量一般；用户文字里写明的代码会优先于模型识别的结果。
 
 分工：AI 负责**识别**截图和文字里的持仓数据，**规则引擎**负责计算买卖方向和数量，AI 再负责**解读**，包括为什么这样做、是否适合做网格、有哪些风险。AI 不会改动引擎算出的数量。
 

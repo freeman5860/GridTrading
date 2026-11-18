@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   analyzePrompt,
+  cleanSymbol,
   analyzeSystemPrompt,
   detectImageType,
   extractionSchema,
@@ -13,7 +14,7 @@ import {
   stateFromTriggered,
 } from "../src/ai/analyze.js";
 import { AIError, createAIClient, describeAIError, withRetry, type AIClient, type ChatRequest } from "../src/ai/providers.js";
-import { prepareAnalysis } from "../src/ai/run.js";
+import { codesInText, prepareAnalysis } from "../src/ai/run.js";
 import type { CheckResult } from "../src/check.js";
 import { parseConfig } from "../src/config.js";
 import type { Quote } from "../src/core/types.js";
@@ -86,6 +87,16 @@ describe("提取结果解析", () => {
     });
   });
 
+  it("修正小模型常见的代码错误", () => {
+    expect(cleanSymbol("bj159915")).toBe("159915");
+    expect(cleanSymbol("创业板ETF 159915")).toBe("159915");
+    expect(cleanSymbol("510300.SH")).toBe("510300");
+    expect(cleanSymbol("hk00700")).toBe("hk00700");
+    expect(cleanSymbol("usAAPL")).toBe("usAAPL");
+    expect(cleanSymbol("QQQ")).toBe("QQQ");
+    expect(holdingFromExtraction({ symbol: "bj159915", basePrice: 2 }).holding?.symbol).toBe("sz159915");
+  });
+
   it("缺少代码或基准价时列出问题，不生成持仓", () => {
     expect(holdingFromExtraction({ symbol: null, basePrice: 4 })).toEqual({ problems: ["没有识别到证券代码"] });
     expect(holdingFromExtraction({ symbol: "AAPL" }).problems).toEqual(["没有识别到基准价 / 持仓成本"]);
@@ -153,6 +164,30 @@ describe("分析流程", () => {
     expect(ctx.source).toBe("config");
     expect(ai.requests).toHaveLength(0);
     expect(ctx.evaluation?.signals).toEqual([]); // −15% 已触发过
+  });
+
+  it("用户文字里写明的代码优先于模型识别的（模型写错时）", async () => {
+    const c = await config();
+    vi.spyOn(tencentSource, "fetchQuotes").mockImplementation(async (symbols) =>
+      new Map(symbols.filter((s) => s === "sz159915").map((s) => [s, q(s, 2.3)])),
+    );
+    const ai = fakeAI(JSON.stringify({ symbol: "cd5000", basePrice: 2.8, position: 5000 }));
+    const ctx = await prepareAnalysis(c, ai, { text: "我持有159915创业板ETF 5000份，成本2.8元", images: [] });
+    expect(ctx.holding?.symbol).toBe("sz159915");
+    expect(ctx.evaluation?.price).toBe(2.3);
+  });
+
+  it("从文字中找出代码", () => {
+    expect(codesInText("我持有159915和 hk700、0700.HK，还有 usQQQ，成本2.8元 5000份")).toEqual(["sz159915", "hk00700", "usQQQ"]);
+    expect(codesInText("沪深300ETF 10000 份")).toEqual([]);
+  });
+
+  it("行情查不到代码时说明原因", async () => {
+    const c = await config();
+    vi.spyOn(tencentSource, "fetchQuotes").mockResolvedValue(new Map());
+    const ai = fakeAI(JSON.stringify({ symbol: "usZZZZ", basePrice: 10, position: 1 }));
+    const ctx = await prepareAnalysis(c, ai, { text: "ZZZZ", images: [] });
+    expect(ctx.problems.join()).toContain("行情接口没有找到代码 usZZZZ");
   });
 
   it("没有代码时按名称匹配 watchlist 中的标的", async () => {

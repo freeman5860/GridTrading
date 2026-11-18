@@ -160,6 +160,7 @@ program
         const sigs = ctx.evaluation.signals;
         console.log(gray(`规则引擎：${sigs.length ? sigs.map((s) => `${s.action === "buy" ? "买入" : "卖出"} ${s.quantity} @ ${s.price}`).join("，") : "不操作"}`));
       }
+      for (const p of ctx.problems) console.log(gray(`说明：${p}`));
       console.log("");
 
       let inThinking = false;

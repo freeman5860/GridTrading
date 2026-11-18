@@ -6,7 +6,7 @@ import OpenAI from "openai";
 import { GoogleGenAI } from "@google/genai";
 import { setTimeout as sleep } from "node:timers/promises";
 
-export type ProviderId = "claude" | "openai" | "gemini";
+export type ProviderId = "claude" | "openai" | "gemini" | "local";
 
 export interface AIConfig {
   provider: ProviderId;
@@ -29,6 +29,8 @@ export interface ChatRequest {
   images?: ImageInput[];
   /** 思考深度：提取信息用 low，分析用 high（仅支持的模型生效） */
   effort?: "low" | "medium" | "high";
+  /** 要求模型只输出 JSON 对象（支持的服务会启用 JSON 模式，提高小模型的稳定性） */
+  json?: boolean;
   signal?: AbortSignal;
 }
 
@@ -61,19 +63,26 @@ export const PROVIDER_INFO: Record<
     defaultModel: "gemini-3.8-flash",
     baseURL: "https://generativelanguage.googleapis.com",
   },
+  // 本地部署的模型（Ollama / LM Studio / vLLM / llama.cpp 等 OpenAI 兼容服务），默认连接本机 Ollama
+  local: {
+    name: "本地模型",
+    defaultModel: "qwen3",
+    baseURL: "http://127.0.0.1:11434/v1",
+  },
 };
 
 export function createAIClient(cfg: AIConfig): AIClient {
   const info = PROVIDER_INFO[cfg.provider];
   const model = cfg.model || info.defaultModel;
   const baseURL = cfg.baseURL || info.baseURL;
-  if (!cfg.apiKey && !(cfg.provider === "claude" && cfg.authToken)) {
+  const keyOptional = cfg.provider === "local" || (cfg.provider === "claude" && cfg.authToken);
+  if (!cfg.apiKey && !keyOptional) {
     throw new AIError(`未配置 ${info.name} 的 API Key（配置文件 ai.apiKey）`);
   }
   const stream =
     cfg.provider === "claude"
       ? claudeStream(cfg, model, baseURL)
-      : cfg.provider === "openai"
+      : cfg.provider === "openai" || cfg.provider === "local"
         ? openaiStream(cfg, model, baseURL)
         : geminiStream(cfg, model, baseURL);
   return { provider: cfg.provider, model, stream };
@@ -120,6 +129,11 @@ export function describeAIError(err: unknown): string {
     .at(-1);
   const msg = (inner ?? raw).replace(/\\n/g, " ").trim().slice(0, 300);
   const name = (err as Error)?.name;
+  const code = (err as { cause?: { code?: string } })?.cause?.code;
+  if (code === "ECONNREFUSED" || /ECONNREFUSED|Connection error/i.test(raw))
+    return "无法连接 AI 服务：如果使用本地模型，请确认服务已启动（Ollama：ollama serve），并检查 ai.baseURL";
+  if (/does not support (multimodal|image|vision)|image input is not supported|not a multimodal model/i.test(raw))
+    return "当前模型不支持识别图片：请换用视觉模型（本地可用 qwen2.5vl、gemma3 等），或改用文字描述";
   if (name === "TimeoutError" || name === "AbortError" || /operation was aborted|timed? ?out/i.test(raw))
     return "AI 服务长时间没有响应，已超时（服务可能繁忙），请稍后重试或换一个模型";
   if (
@@ -130,7 +144,10 @@ export function describeAIError(err: unknown): string {
     return "AI 服务的 API Key 无效，请检查配置 ai.apiKey";
   if (status === 401 || status === 403)
     return "AI 服务认证失败（401/403），请检查 API Key 是否正确、是否有权限";
-  if (status === 404) return `模型不存在或当前 Key 无权使用：${msg}`;
+  if (status === 404)
+    return /model .*not found|try pulling/i.test(raw)
+      ? `本地还没有这个模型：${msg}（Ollama 可运行 ollama pull <模型名> 下载）`
+      : `模型不存在或当前 Key 无权使用：${msg}`;
   if (status === 429) return "AI 服务请求过于频繁或额度不足（429），请稍后再试";
   if (status === 503) return "AI 服务当前繁忙（503），请稍后重试或换一个模型";
   if (typeof status === "number" && status >= 500)
@@ -213,9 +230,56 @@ function claudeStream(cfg: AIConfig, model: string, baseURL: string) {
 
 // ---------------- ChatGPT / OpenAI 兼容服务 ----------------
 
+/**
+ * 把正文中的 <think>…</think> 拆成思考过程（Qwen3、DeepSeek-R1 等本地推理模型会这样输出）。
+ * 流式输出时标签可能被拆在两个片段之间，所以按状态逐段处理。
+ */
+export class ThinkSplitter {
+  private buf = "";
+  private inThink = false;
+
+  push(chunk: string): StreamEvent[] {
+    this.buf += chunk;
+    const out: StreamEvent[] = [];
+    for (;;) {
+      const tag = this.inThink ? "</think>" : "<think>";
+      const i = this.buf.indexOf(tag);
+      if (i >= 0) {
+        this.emit(out, this.buf.slice(0, i));
+        this.buf = this.buf.slice(i + tag.length);
+        this.inThink = !this.inThink;
+        continue;
+      }
+      // 末尾可能是半个标签，先留着
+      let keep = 0;
+      for (let n = Math.min(tag.length - 1, this.buf.length); n > 0; n--) {
+        if (tag.startsWith(this.buf.slice(-n))) {
+          keep = n;
+          break;
+        }
+      }
+      this.emit(out, this.buf.slice(0, this.buf.length - keep));
+      this.buf = this.buf.slice(this.buf.length - keep);
+      return out;
+    }
+  }
+
+  flush(): StreamEvent[] {
+    const out: StreamEvent[] = [];
+    this.emit(out, this.buf);
+    this.buf = "";
+    return out;
+  }
+
+  private emit(out: StreamEvent[], text: string) {
+    if (text) out.push({ t: this.inThink ? "thinking" : "text", v: text });
+  }
+}
+
 function openaiStream(cfg: AIConfig, model: string, baseURL: string) {
   const client = new OpenAI({
-    apiKey: cfg.apiKey,
+    // 本地服务通常不校验 Key，但 SDK 要求非空
+    apiKey: cfg.apiKey || "local",
     baseURL,
     organization: null,
     project: null,
@@ -234,6 +298,7 @@ function openaiStream(cfg: AIConfig, model: string, baseURL: string) {
       {
         model,
         stream: true,
+        ...(req.json ? { response_format: { type: "json_object" as const } } : {}),
         messages: [
           { role: "system", content: req.system },
           // 纯文字时用字符串，兼容不支持多模态数组的 OpenAI 兼容服务
@@ -243,16 +308,18 @@ function openaiStream(cfg: AIConfig, model: string, baseURL: string) {
       { signal: req.signal },
     );
     let finish: string | null = null;
+    const splitter = new ThinkSplitter();
     for await (const chunk of stream) {
       const choice = chunk.choices[0];
       if (!choice) continue;
-      // 部分兼容服务（如 DeepSeek）用 reasoning_content 返回思考过程
-      const reasoning = (choice.delta as { reasoning_content?: string })
-        .reasoning_content;
+      // 部分兼容服务用 reasoning_content（DeepSeek、vLLM）或 reasoning（Ollama）返回思考过程
+      const delta = choice.delta as { reasoning_content?: string; reasoning?: string };
+      const reasoning = delta.reasoning_content ?? delta.reasoning;
       if (reasoning) yield { t: "thinking", v: reasoning };
-      if (choice.delta?.content) yield { t: "text", v: choice.delta.content };
+      if (choice.delta?.content) yield* splitter.push(choice.delta.content);
       if (choice.finish_reason) finish = choice.finish_reason;
     }
+    yield* splitter.flush();
     if (finish === "length")
       throw new AIError("回答过长被截断，请缩小问题范围后重试");
     if (finish === "content_filter")
@@ -314,7 +381,11 @@ function geminiStream(cfg: AIConfig, model: string, baseURL: string) {
             ],
           },
         ],
-        config: { systemInstruction: req.system, abortSignal: signal },
+        config: {
+          systemInstruction: req.system,
+          abortSignal: signal,
+          ...(req.json ? { responseMimeType: "application/json" } : {}),
+        },
       }),
     );
     let finish: string | undefined;

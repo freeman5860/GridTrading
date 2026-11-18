@@ -95,7 +95,7 @@ const configSchema = z.object({
     .default({ interval: 15 * 60_000 }),
   ai: z
     .object({
-      provider: z.enum(["claude", "openai", "gemini"]),
+      provider: z.enum(["claude", "openai", "gemini", "local"]),
       apiKey: optionalString,
       /** 仅 Claude：代理网关的 Bearer Token，可代替 apiKey */
       authToken: optionalString,
@@ -235,10 +235,14 @@ schedule:
 
 # AI 分析（gridbot analyze）与邮件点评，可选
 # ai:
-#   provider: claude       # claude | openai | gemini
+#   provider: claude       # claude | openai | gemini | local（本地模型，如 Ollama 部署的 Qwen）
 #   apiKey: \${ANTHROPIC_API_KEY}   # openai 用 \${OPENAI_API_KEY}，gemini 用 \${GEMINI_API_KEY}
 #   model: claude-opus-5-5 # 不填使用默认模型（openai: gpt-5.5，gemini: gemini-3.8-flash）
 #   # baseURL: https://api.deepseek.com   # provider: openai 时可指向任意 OpenAI 兼容服务
+#   # 本地模型示例（不需要 apiKey）：
+#   # provider: local
+#   # model: qwen3          # 识别截图需要视觉模型，如 qwen2.5vl
+#   # baseURL: http://127.0.0.1:11434/v1   # 默认 Ollama；LM Studio 为 :1234/v1，vLLM 为 :8000/v1
 #   emailComment: false    # true 时信号邮件附带 AI 点评
 
 watchlist:

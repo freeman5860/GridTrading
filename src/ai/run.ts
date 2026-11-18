@@ -9,6 +9,7 @@ import {
   holdingFromExtraction,
   stateFromTriggered,
   type AnalysisContext,
+  cleanSymbol,
   type Extraction,
 } from "./analyze.js";
 import { AIError, type AIClient, type ImageInput } from "./providers.js";
@@ -52,7 +53,10 @@ export async function prepareAnalysis(config: Config, client: AIClient, input: A
       }
     }
 
-    const built = holdingFromExtraction(extraction, symbol);
+    // 用户文字里明确写出的代码比模型识别的更可靠（小模型经常把代码写错）
+    const fromText = symbol ? [] : codesInText(input.text);
+    const chosen = symbol ?? (await pickQuotedSymbol(config, [...fromText, extraction.symbol ?? ""], input.signal));
+    const built = holdingFromExtraction(extraction, chosen);
     problems.push(...built.problems);
     if (built.holding) {
       holding = built.holding;
@@ -65,6 +69,44 @@ export async function prepareAnalysis(config: Config, client: AIClient, input: A
 
   if (!holding) return { extraction, problems, source };
   return finish(config, holding, state, extraction, problems, source, input.signal);
+}
+
+/** 从用户文字中找出明确的证券代码：6 位数字、hk + 数字、us + 字母、或 0700.HK 这类写法 */
+export function codesInText(text: string | undefined): string[] {
+  if (!text) return [];
+  const found = text.match(/(?<![0-9A-Za-z])(?:(?:sh|sz|bj)?\d{6}|hk\d{1,5}|\d{4,5}\.hk|us[A-Z]{1,5})(?![0-9A-Za-z])/gi) ?? [];
+  const out: string[] = [];
+  for (const f of found) {
+    try {
+      const s = normalizeSymbol(f).symbol;
+      if (!out.includes(s)) out.push(s);
+    } catch {
+      /* 忽略 */
+    }
+  }
+  return out;
+}
+
+/** 依次尝试候选代码，返回第一个能查到行情的；都查不到时返回第一个候选 */
+async function pickQuotedSymbol(config: Config, candidates: string[], signal?: AbortSignal): Promise<string | undefined> {
+  const list: string[] = [];
+  for (const c of candidates) {
+    const cleaned = cleanSymbol(c);
+    if (!cleaned) continue;
+    try {
+      const s = normalizeSymbol(cleaned).symbol;
+      if (!list.includes(s)) list.push(s);
+    } catch {
+      /* 无法识别的候选跳过 */
+    }
+  }
+  if (list.length <= 1) return list[0] ?? (candidates.find(Boolean) || undefined);
+  try {
+    const quotes = await getQuoteSource(config.market.source).fetchQuotes(list, { signal });
+    return list.find((s) => quotes.has(s)) ?? list[0];
+  } catch {
+    return list[0];
+  }
 }
 
 const normName = (s: string) => s.replace(/[\s()（）\-·]/g, "").toUpperCase();
@@ -100,6 +142,9 @@ async function finish(
     quote = (await getQuoteSource(config.market.source).fetchQuotes([holding.symbol], { signal })).get(holding.symbol);
   } catch (e) {
     problems.push(`获取实时行情失败：${(e as Error).message}`);
+  }
+  if (!quote && !problems.some((p) => p.startsWith("获取实时行情失败"))) {
+    problems.push(`行情接口没有找到代码 ${holding.symbol}，请确认代码是否正确`);
   }
   const price = quote && !quote.suspended ? quote.price : (extraction?.price ?? undefined);
   if (!(price && price > 0)) {

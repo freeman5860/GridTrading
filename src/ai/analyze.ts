@@ -116,6 +116,7 @@ export async function extractHolding(
     prompt: input.text?.trim() ? `用户描述：\n${input.text}` : "请从截图中提取持仓信息。",
     images: input.images,
     effort: "low",
+    json: true,
     signal: input.signal,
   });
   const parsed = extractionSchema.safeParse(parseJsonObject(raw));
@@ -134,11 +135,24 @@ function parseStep(v: number | string | null | undefined): GridStep | undefined 
   return undefined;
 }
 
+/**
+ * 修正模型给出的代码：只保留代码本身（小模型常写成"创业板ETF 159915"），
+ * 并且 6 位 A 股代码按数字重新判断交易所（小模型经常把交易所前缀写错，如把 159915 写成 bj159915）。
+ */
+export function cleanSymbol(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const s = raw.trim();
+  const cn = s.match(/(?:^|[^0-9])(?:sh|sz|bj)?(\d{6})(?:\.(?:sh|sz|bj))?(?![0-9])/i);
+  if (cn && !/^hk/i.test(s)) return cn[1];
+  const token = s.match(/(?:hk|us)?[A-Za-z0-9.]+(?:\.(?:hk|us))?/gi)?.find((t) => /\d|^[A-Z]{1,5}$|^(hk|us)/i.test(t));
+  return token ?? s;
+}
+
 /** 把提取结果转成引擎可用的持仓；缺少代码或基准价时返回 undefined */
 export function holdingFromExtraction(x: Extraction, symbolOverride?: string): { holding?: Holding; problems: string[] } {
   const problems: string[] = [];
   let symbol: string | undefined;
-  const rawSymbol = symbolOverride ?? x.symbol ?? undefined;
+  const rawSymbol = cleanSymbol(symbolOverride ?? x.symbol ?? undefined);
   if (rawSymbol) {
     try {
       symbol = normalizeSymbol(rawSymbol).symbol;
