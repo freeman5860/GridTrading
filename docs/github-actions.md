@@ -51,7 +51,7 @@ workflow 在工作日按 UTC 时间每 15 分钟触发一次，覆盖北京时�
 
 ## 修改持仓
 
-成交后需要更新持仓：编辑 Secret `GRIDBOT_CONFIG`，改掉对应的 `position`，或者修改 `basePrice` 开始新一轮。下次运行即生效。
+成交后需要更新持仓：编辑 Secret `GRIDBOT_CONFIG`，改掉对应的 `position`，需要的话同时更新 `cash` 和 `basePrice`（已触发档位保留，不会重复提醒）。下次运行即生效。要重新开始一轮，在 Actions → Caches 页面删除缓存（会重置全部标的）。
 
 ## 注意事项
 

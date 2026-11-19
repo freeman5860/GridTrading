@@ -1,6 +1,6 @@
 import type { Config } from "./config.js";
 import { evaluate } from "./core/engine.js";
-import type { Evaluation, FxRate, Holding, Market, Quote } from "./core/types.js";
+import type { AlertedSignals, Evaluation, FxRate, Holding, Market, Quote, SymbolState } from "./core/types.js";
 import { marketOf } from "./core/symbol.js";
 import { quoteIsFresh } from "./market/hours.js";
 import { getQuoteSource } from "./market/source.js";
@@ -69,7 +69,11 @@ export async function prepareCheck(config: Config, opts: CheckOptions = {}): Pro
     try {
       const evaluation = evaluate(holding, quote, state.symbols[holding.symbol], { fx });
       // 停牌等无有效价格时不更新状态
-      if (!quote.suspended) state.symbols[holding.symbol] = { ...evaluation.nextState, updatedAt };
+      if (!quote.suspended) {
+        const next: SymbolState = { ...evaluation.nextState, updatedAt };
+        if (evaluation.signals.length) next.alerted = mergeAlerted(next.alerted, evaluation, holding.position, updatedAt);
+        state.symbols[holding.symbol] = next;
+      }
       return { holding, quote, evaluation };
     } catch (e) {
       return { holding, quote, error: (e as Error).message };
@@ -91,6 +95,16 @@ export async function prepareCheck(config: Config, opts: CheckOptions = {}): Pro
 }
 
 const MAINLAND_PROBE = "sh000001";
+
+/**
+ * 记录已提醒、待确认成交的信号。上次的还没确认时追加：
+ * 新信号是按配置中（未更新）的持仓算的，预计持仓在上次的基础上加上本次的变化。
+ */
+export function mergeAlerted(prev: AlertedSignals | undefined, ev: Evaluation, position: number, at: string): AlertedSignals {
+  const delta = ev.positionAfter - position;
+  if (!prev) return { at, signals: ev.signals, positionAfter: ev.positionAfter };
+  return { at: prev.at, signals: [...prev.signals, ...ev.signals], positionAfter: prev.positionAfter + delta };
+}
 
 /** 获取港元兑人民币汇率；失败时返回 undefined（引擎会提示并不按资金限制） */
 export async function fetchFx(signal?: AbortSignal): Promise<FxRate | undefined> {

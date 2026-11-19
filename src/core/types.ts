@@ -49,7 +49,7 @@ export interface Holding {
   position: number;
   /** 该标的可用资金（与标的同币种；港股通为人民币），不填视为不限制 */
   cash?: number;
-  /** 港股通买入的港股：价格仍为港元，可用资金 cash 和手续费为人民币 */
+  /** 港股通买入的港股：基准价、可用资金 cash、手续费为人民币；网格价格仍为港元 */
   connect?: boolean;
   /** 是否启用第一层分档仓位管理，默认 true */
   tiers?: boolean;
@@ -70,7 +70,7 @@ export interface GridState {
 }
 
 export interface SymbolState {
-  /** 本轮使用的基准价；配置中的基准价变化时视为新一轮，重置已触发档位 */
+  /** 上次使用的基准价；配置中的基准价变化时已触发档位保留（本轮已清仓时才开始新一轮） */
   basePrice: number;
   /** 本轮已触发（已提醒）的档位，每档每轮只触发一次 */
   triggered: TierId[];
@@ -79,6 +79,24 @@ export interface SymbolState {
   grid?: GridState;
   lastPrice?: number;
   updatedAt?: string;
+  /** 已提醒、但用户还没确认成交的信号（档位已标记为触发，之后不会再次产生，所以单独保存） */
+  alerted?: AlertedSignals;
+}
+
+export interface SignalReview {
+  /** execute 执行；hold 暂缓；error AI 决策失败 */
+  decision: "execute" | "hold" | "error";
+  reason: string;
+  /** 模型，如 "Gemini · gemini-4-hydrogen" */
+  by: string;
+}
+
+export interface AlertedSignals {
+  /** 首次提醒时间 */
+  at: string;
+  signals: Signal[];
+  /** 全部按信号成交后的预计持仓 */
+  positionAfter: number;
 }
 
 export interface Signal {
@@ -88,8 +106,12 @@ export interface Signal {
   /** 参考价格：分档信号为现价，网格信号为该格挂单价 */
   price: number;
   amount: number;
-  /** 港股通：按汇率折算的人民币金额（约数） */
+  /** 港股通：按汇率折算的人民币金额（约数，买入按买入参考汇率） */
   amountCny?: number;
+  /** 港股通：计算时的港元兑人民币中间价 */
+  fxRate?: number;
+  /** 买入信号的 AI 决策（发送提醒前） */
+  review?: SignalReview;
   ruleId: string;
   reason: string;
 }
@@ -113,6 +135,8 @@ export interface Evaluation {
   nextTiers: { up?: { id: TierId; price: number }; down?: { id: TierId; price: number } };
   grid?: { levels: number[]; anchor: number; lots: number; nextBuy?: number; nextSell?: number };
   nextState: SymbolState;
+  /** 港股通：basePrice 为人民币，这里是按汇率折算的港元基准价（档位价格都以港元计） */
+  basePriceHkd?: number;
   /** 港股通使用的汇率（1 港元 = rate 人民币） */
   fx?: FxRate;
 }

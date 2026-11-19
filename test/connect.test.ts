@@ -1,4 +1,4 @@
-// 港股通：价格为港元，可用资金 / 手续费为人民币
+// 港股通：行情为港元，基准价 / 可用资金 / 手续费为人民币
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { prepareCheck } from "../src/check.js";
 import { parseConfig } from "../src/config.js";
 import { evaluate } from "../src/core/engine.js";
+import { estimateFill } from "../src/core/fill.js";
 import type { Holding, Quote } from "../src/core/types.js";
 import { fxSource, parseFx } from "../src/market/fx.js";
 import { tencentSource } from "../src/market/tencent.js";
@@ -13,7 +14,8 @@ import { renderSignalEmail } from "../src/notify/render.js";
 
 afterEach(() => vi.restoreAllMocks());
 
-const tencent: Holding = { symbol: "hk00700", basePrice: 400, position: 1000, cash: 20000, connect: true };
+// 基准价 340 元，汇率 0.85 → 400 港元
+const tencent: Holding = { symbol: "hk00700", basePrice: 340, position: 1000, cash: 20000, connect: true };
 const fx = { rate: 0.85 };
 
 describe("港股通引擎", () => {
@@ -29,6 +31,28 @@ describe("港股通引擎", () => {
     const ok = evaluate({ ...tencent, cash: 40000 }, { price: 340, lotSize: 100 }, undefined, { fx });
     expect(ok.signals[0]).toMatchObject({ action: "buy", quantity: 100, amount: 34000, amountCny: 29767 });
     expect(ok.fx).toEqual(fx);
+    expect(ok.basePrice).toBe(340); // 显示人民币
+    expect(ok.basePriceHkd).toBe(400);
+    expect(ok.nextTiers.down).toEqual({ id: "down25", price: 300 }); // 档位价格为港元
+  });
+
+  it("按人民币计算涨跌幅：港股价格不变、港元升值也会接近档位", () => {
+    // 现价 400 港元不变，汇率 0.85 → 0.9：人民币市值涨了 5.9%
+    expect(evaluate(tencent, { price: 400, lotSize: 100 }, undefined, { fx: { rate: 0.9 } }).change).toBeCloseTo(0.0588, 3);
+  });
+
+  it("状态保存人民币基准价：汇率变化、加仓后改基准价都不会重复提醒", () => {
+    const first = evaluate({ ...tencent, cash: 40000 }, { price: 340, lotSize: 100 }, undefined, { fx });
+    expect(first.nextState).toMatchObject({ basePrice: 340, triggered: ["down15"] });
+    const again = evaluate({ ...tencent, cash: 40000 }, { price: 330, lotSize: 100 }, first.nextState, { fx: { rate: 0.86 } });
+    expect(again.signals).toEqual([]);
+    expect(again.nextState.triggered).toEqual(["down15"]);
+
+    // 实际场景：买入 100 股后把基准价改成新的持仓成本 → 不再提醒 −15%
+    const lowered = evaluate({ ...tencent, basePrice: 330, position: 1100, cash: 10000 }, { price: 340, lotSize: 100 }, first.nextState, { fx });
+    expect(lowered.signals).toEqual([]);
+    expect(lowered.nextState).toMatchObject({ basePrice: 330, triggered: ["down15"] });
+    expect(lowered.notes.map((n) => n.text).join()).toContain("基准价由 340 元改为 330 元，已触发档位保留");
   });
 
   it("卖出按卖出参考汇率（中间价 −3%）估算人民币金额", () => {
@@ -36,15 +60,12 @@ describe("港股通引擎", () => {
     expect(ev.signals[0]).toMatchObject({ action: "sell", quantity: 100, amount: 50000, amountCny: 41225 });
   });
 
-  it("没有汇率时不按资金限制，并提示", () => {
-    const ev = evaluate(tencent, { price: 340, lotSize: 100 });
-    expect(ev.signals[0]).toMatchObject({ action: "buy", quantity: 100 });
-    expect(ev.signals[0]!.amountCny).toBeUndefined();
-    expect(ev.notes.some((n) => n.level === "warn" && n.text.includes("没有获取到港元汇率"))).toBe(true);
+  it("没有汇率时无法计算（基准价是人民币）", () => {
+    expect(() => evaluate(tencent, { price: 340, lotSize: 100 })).toThrow(/获取汇率失败/);
   });
 
   it("普通港股不受影响", () => {
-    const ev = evaluate({ ...tencent, connect: undefined }, { price: 340, lotSize: 100 }, undefined, { fx });
+    const ev = evaluate({ ...tencent, basePrice: 400, connect: undefined }, { price: 340, lotSize: 100 }, undefined, { fx });
     expect(ev.notes.map((n) => n.text).join()).toContain("可用资金只够买 0"); // 20000 港元 < 34000
     expect(ev.signals).toEqual([]);
     expect(ev.fx).toBeUndefined();
@@ -58,7 +79,7 @@ describe("港股通配置与检查", () => {
   });
   const cfg = async (connect = "true") =>
     parseConfig(
-      `watchlist:\n  - { symbol: 700, basePrice: 400, position: 1000, cash: 40000, connect: ${connect} }\n`,
+      `watchlist:\n  - { symbol: 700, basePrice: ${connect === "true" ? 340 : 400}, position: 1000, cash: 40000, connect: ${connect} }\n`,
       path.join(await mkdtemp(path.join(tmpdir(), "gridbot-connect-")), "gridbot.yaml"),
     );
 
@@ -81,6 +102,14 @@ describe("港股通配置与检查", () => {
     const mail = renderSignalEmail(result);
     expect(mail.text).toContain("港股通");
     expect(mail.text).toContain("约 29,767 元");
+    expect(mail.text).toContain("基准价 340 元（≈ 400 HKD）");
+  });
+
+  it("获取汇率失败时该标的报错，不影响其他标的", async () => {
+    vi.spyOn(fxSource, "fetchHkdCny").mockRejectedValue(new Error("down"));
+    vi.spyOn(tencentSource, "fetchQuotes").mockResolvedValue(new Map([["hk00700", q("hk00700", "hk", "2026-11-17 10:00:00")]]));
+    const { result } = await prepareCheck(await cfg());
+    expect(result.items[0]!.error).toContain("获取汇率失败");
   });
 
   it("定时检查：内地休市日跳过港股通标的", async () => {
@@ -110,5 +139,28 @@ describe("港股通配置与检查", () => {
     quotes.mockClear();
     await prepareCheck(await cfg("false"), { requireFresh: true, now });
     expect(quotes.mock.calls[0]![0]).not.toContain("sh000001");
+  });
+});
+
+describe("确认成交：估算可用资金和持仓成本", () => {
+  const buy = (quantity: number, price: number, fxRate?: number) =>
+    ({ layer: "tier", action: "buy", quantity, price, amount: quantity * price, ruleId: "down15", reason: "", fxRate }) as const;
+
+  it("全部成交：买入扣减资金、摊薄成本", () => {
+    expect(estimateFill({ position: 1000, cash: 50000, basePrice: 10 }, [buy(100, 8)])).toEqual({ position: 1100, cash: 49200, basePrice: 9.818 });
+  });
+
+  it("港股通：按中间价折算人民币", () => {
+    // 你的场景：1400 股、成本 432.389 元，买入 100 @ 350.4 港元，汇率 0.8494 → 每股约 297.63 元
+    const e = estimateFill({ position: 1400, cash: 86844, basePrice: 432.389 }, [buy(100, 350.4, 0.8494), buy(100, 350.4, 0.8494)], 1500);
+    expect(e.position).toBe(1500);
+    expect(e.cash).toBe(57081.02);
+    expect(e.basePrice).toBe(423.405);
+  });
+
+  it("卖出增加资金、成本不变；没有配置资金时不估算", () => {
+    const sell = { ...buy(100, 12), action: "sell" as const, ruleId: "up25" };
+    expect(estimateFill({ position: 1000, cash: 0, basePrice: 10 }, [sell])).toEqual({ position: 900, cash: 1200, basePrice: 10 });
+    expect(estimateFill({ position: 1000, basePrice: 10 }, [buy(100, 8)]).cash).toBeUndefined();
   });
 });

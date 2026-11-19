@@ -16,6 +16,7 @@ import { styleText } from "node:util";
 import { loadState, saveState } from "../state.js";
 import { formatCheck, formatItem, formatQuote } from "./format.js";
 import { startServer } from "../server/index.js";
+import { startMonitor } from "../server/monitor.js";
 
 const program = new Command()
   .name("gridbot")
@@ -208,21 +209,28 @@ program
   .description("启动本地网页控制台：查看持仓与信号、成交后更新持仓、AI 截图分析")
   .option("-p, --port <port>", "端口", "8686")
   .option("--host <host>", "监听地址；默认只允许本机访问，局域网访问用 0.0.0.0（注意安全）", "127.0.0.1")
-  .action(async (opts: { port: string; host: string }) => {
+  .option("--no-monitor", "不在控制台中定时检查和发送提醒（已用 gridbot run 或 GitHub Actions 时使用）")
+  .action(async (opts: { port: string; host: string; monitor: boolean }) => {
     const configPath = program.opts<{ config: string }>().config;
     // 先校验配置，有错误直接提示；还没有配置文件时可以在网页上按向导创建
     const exists = await access(configPath).then(() => true, () => false);
     if (exists) await loadConfig(configPath);
     const port = Number(opts.port);
     if (!Number.isInteger(port) || port <= 0 || port > 65535) fail(`端口无效：${opts.port}`);
+    const monitor = opts.monitor ? startMonitor({ configPath, log: (line) => log(`[监控] ${line}`) }) : undefined;
     try {
-      await startServer({ configPath, host: opts.host, port });
+      await startServer({ configPath, host: opts.host, port, monitor });
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
       fail(code === "EADDRINUSE" ? `端口 ${port} 已被占用，可以用 --port 换一个` : `启动失败：${(e as Error).message}`);
     }
     const shown = opts.host === "0.0.0.0" || opts.host === "::" ? "localhost" : opts.host.includes(":") ? `[${opts.host}]` : opts.host;
     console.log(`控制台已启动：http://${shown}:${port}  （Ctrl+C 退出）`);
+    console.log(
+      opts.monitor
+        ? "定时监控已开启：交易时段内按配置的间隔检查，有信号时发送提醒（已在用 gridbot run / GitHub Actions 时，可加 --no-monitor 避免重复检查）"
+        : "定时监控未开启（--no-monitor）：控制台只用于查看，提醒由 gridbot run 或 GitHub Actions 发送",
+    );
     if (!exists) console.log(`还没有配置文件 ${configPath}：在浏览器中打开控制台，按向导设置持仓、提醒渠道和 AI。`);
     if (!["127.0.0.1", "localhost", "::1"].includes(opts.host)) {
       console.log("⚠ 当前允许其他设备访问。控制台可以修改配置文件并调用 AI（产生费用），请只在可信的网络中使用。");

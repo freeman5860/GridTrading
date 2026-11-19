@@ -71,9 +71,10 @@ export function renderMarkdown(el, text) {
 
 /**
  * 打开确认对话框。onOk 返回 Promise；出错时在对话框内显示错误，不关闭。
- * fields: [{ name, label, value, placeholder, step }]
+ * fields: [{ name, label, value, placeholder, step, hint }]
+ * onInput(name, values, set)：某个输入框变化时调用，可用 set(name, value) 联动修改其他输入框
  */
-export function openDialog({ title, text, fields = [], okText = "确定", onOk }) {
+export function openDialog({ title, text, fields = [], okText = "确定", onOk, onInput }) {
   const dialog = $("#dialog");
   $("#dialog-title").textContent = title;
   const body = $("#dialog-body");
@@ -89,7 +90,16 @@ export function openDialog({ title, text, fields = [], okText = "确定", onOk }
       placeholder: f.placeholder ?? "",
       required: f.required,
     });
-    body.append(h("label", {}, h("span", {}, f.label), inputs[f.name]));
+    body.append(h("label", {}, h("span", {}, f.label), inputs[f.name], f.hint && h("small", { class: "muted" }, f.hint)));
+  }
+  const readValues = () => {
+    const values = {};
+    for (const [k, input] of Object.entries(inputs)) values[k] = input.value.trim() === "" ? null : Number(input.value);
+    return values;
+  };
+  if (onInput) {
+    const set = (name, v) => (inputs[name].value = v === undefined || v === null ? "" : String(v));
+    for (const [k, input] of Object.entries(inputs)) input.addEventListener("input", () => onInput(k, readValues(), set));
   }
   const err = $("#dialog-error");
   err.hidden = true;
@@ -101,8 +111,7 @@ export function openDialog({ title, text, fields = [], okText = "确定", onOk }
   form.onsubmit = async (e) => {
     if (e.submitter?.value !== "ok") return; // 取消
     e.preventDefault();
-    const values = {};
-    for (const [k, input] of Object.entries(inputs)) values[k] = input.value.trim() === "" ? null : Number(input.value);
+    const values = readValues();
     ok.disabled = true;
     try {
       await onOk(values);

@@ -11,6 +11,7 @@ import type { Notifier } from "./notify/email.js";
 import { channelsFor, combine, NotifyError, type SendReport } from "./notify/index.js";
 import { renderSignalEmail, signalItems, type RenderedEmail } from "./notify/render.js";
 import { emailComment } from "./ai/analyze.js";
+import { reviewBuys } from "./ai/review.js";
 import { createAIClient, describeAIError, PROVIDER_INFO, type AIClient } from "./ai/providers.js";
 
 export const ALL_MARKETS: Market[] = ["cn", "hk", "us"];
@@ -50,6 +51,17 @@ export async function tick(config: Config, deps: TickDeps = {}): Promise<TickOut
   const prepared = await prepareCheck(config, { markets: open, requireFresh: true, now });
   const { result } = prepared;
   const notifier = deps.notifier === undefined ? notifierFor(config) : deps.notifier;
+
+  // 买入信号先交给 AI 决策（执行 / 暂缓），决策写入信号，随提醒发送并保存在待确认记录中
+  if (config.ai?.reviewBuys && result.items.some((i) => i.evaluation?.signals.some((s) => s.action === "buy"))) {
+    let client: AIClient | null = null;
+    try {
+      client = deps.ai === undefined ? createAIClient(config.ai) : deps.ai;
+    } catch (e) {
+      markReviewError(result, describeAIError(e));
+    }
+    if (client) await reviewBuys(client, result.items, AbortSignal.timeout(180_000));
+  }
   const shouldNotify = notifier && (result.signalCount > 0 || config.notify?.always);
 
   let notified = false;
@@ -67,6 +79,11 @@ export async function tick(config: Config, deps: TickDeps = {}): Promise<TickOut
   }
   await prepared.commit();
   return { status: "checked", markets: open, result, notified, report };
+}
+
+function markReviewError(result: CheckResult, error: string) {
+  for (const i of result.items)
+    for (const s of i.evaluation?.signals ?? []) if (s.action === "buy") s.review = { decision: "error", reason: `AI 决策失败（${error}），按规则信号提醒，请自行判断`, by: "" };
 }
 
 /** 渲染信号邮件；开启 ai.emailComment 时附带 AI 点评，点评失败不影响发送 */

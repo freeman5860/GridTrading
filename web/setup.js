@@ -285,6 +285,7 @@ function renderHoldings() {
 function holdingEditor(it, i, items, redraw) {
   const quoteLine = h("div", { class: "quote-line small" });
   const base = numInput(it, "basePrice", { placeholder: "如 4.00" });
+  let lastQuote; // { q, fx }：用于"用现价作为基准价"，港股通时折算成人民币
 
   let seq = 0;
   let looked;
@@ -298,46 +299,64 @@ function holdingEditor(it, i, items, redraw) {
     try {
       const {
         quotes: [q],
+        fx,
       } = await api(`/api/quote?symbols=${encodeURIComponent(s)}`);
       if (my !== seq) return;
       if (q.error) return quoteLine.replaceChildren(h("span", { class: "warn-text" }, q.error));
+      lastQuote = { q, fx };
       setHK(q.market === "hk");
-      quoteLine.replaceChildren(
-        h("span", { class: "ok-text" }, `✓ ${q.name}`),
-        h("span", { class: "muted" }, ` · ${q.symbol} · 现价 ${q.price} ${q.currency} · 每手 ${q.lotSize}`),
-        " ",
+      drawQuote();
+    } catch (e) {
+      if (my === seq) quoteLine.replaceChildren(h("span", { class: "warn-text" }, e.message));
+    }
+  }
+  function drawQuote() {
+    if (!lastQuote) return;
+    const { q, fx } = lastQuote;
+    // 港股通：基准价为人民币，现价按汇率折算
+    const cnyPrice = it.connect && fx ? Math.round(q.price * fx.rate * 1000) / 1000 : undefined;
+    const usable = !it.connect || cnyPrice !== undefined;
+    quoteLine.replaceChildren(
+      h("span", { class: "ok-text" }, `✓ ${q.name}`),
+      h("span", { class: "muted" }, ` · ${q.symbol} · 现价 ${q.price} ${q.currency}${cnyPrice !== undefined ? `（≈ ¥${cnyPrice}，汇率 ${fx.rate}）` : ""} · 每手 ${q.lotSize}`),
+      " ",
+      usable &&
         h(
           "button",
           {
             class: "linkbtn",
             type: "button",
             onclick: () => {
-              it.basePrice = q.price;
-              base.value = String(q.price);
+              it.basePrice = cnyPrice ?? q.price;
+              base.value = String(it.basePrice);
             },
           },
-          "用现价作为基准价",
+          cnyPrice !== undefined ? "用现价（人民币）作为基准价" : "用现价作为基准价",
         ),
-      );
-    } catch (e) {
-      if (my === seq) quoteLine.replaceChildren(h("span", { class: "warn-text" }, e.message));
-    }
+    );
   }
   const sym = input(it, "symbol", { placeholder: "如 510300、00700、AAPL", autocomplete: "off" });
 
   // 港股：可选"通过港股通买入"，此时可用资金和手续费为人民币
-  const cashLabel = h("span", { class: "field-label" }, it.connect ? "可用资金（人民币）" : "可用资金");
+  const cashLabel = h("span", { class: "field-label" }, "");
   const cashHint = h("span", { class: "hint" }, "");
+  const baseLabel = h("span", { class: "field-label" }, "");
+  const baseHint = h("span", { class: "hint" }, "");
   const updateCash = () => {
     cashLabel.textContent = it.connect ? "可用资金（人民币）" : "可用资金";
-    cashHint.textContent = it.connect ? "港股通账户里的人民币可用资金，按实时汇率折算成港元计算" : "该标的用于加仓的资金（标的币种）";
+    cashHint.textContent = it.connect ? "港股通账户里的人民币可用资金" : "该标的用于加仓的资金（标的币种）";
+    baseLabel.textContent = it.connect ? "基准价 P0（人民币）" : "基准价 P0";
+    baseHint.textContent =
+      (it.connect ? "人民币，按实时汇率折算成港元比较。" : "") +
+      "首次建仓均价或你认定的价格中枢；加仓后可改成新的持仓成本，已触发的档位保留，不会重复提醒";
+    drawQuote();
   };
   updateCash();
   const connectRow = h(
     "div",
     { class: "connect-row", hidden: !it.connect && !/^(hk|\d{1,5}$)/i.test(it.symbol ?? "") },
     checkbox(it, "connect", "通过港股通买入（资金为人民币）", updateCash),
-    h("span", { class: "hint" }, "价格、基准价、网格仍按港元填写；可用资金和手续费按人民币填写。内地休市日港股通不交易，定时检查会自动跳过。"),
+    h("span", { class: "hint" }, "基准价、可用资金、手续费按人民币填写（与港股通账户一致）；网格价格是挂单价，仍按港元填写。内地休市日港股通不交易，定时检查会自动跳过。"),
   );
   const setHK = (isHK) => {
     connectRow.hidden = !isHK;
@@ -393,7 +412,7 @@ function holdingEditor(it, i, items, redraw) {
       "div",
       { class: "form-grid" },
       h("div", { class: "field span2" }, h("span", { class: "field-label" }, "代码"), sym, quoteLine, h("span", { class: "hint" }, "A 股 / 港股 / 美股都可以，如 510300、sh510300、00700、hk00700、AAPL")),
-      field("基准价 P0", base, "首次买入均价，或你认定的价格中枢"),
+      h("label", { class: "field" }, baseLabel, base, baseHint),
       field("当前持仓", numInput(it, "position", { step: "1", placeholder: "如 10000" }), "股 / 份，交易后在监控页更新"),
       h("label", { class: "field" }, cashLabel, numInput(it, "cash", { placeholder: "留空表示不限制" }), cashHint),
     ),
@@ -573,6 +592,7 @@ function renderAI() {
       model: same ? saved.model : undefined,
       baseURL: same ? saved.baseURL : undefined,
       emailComment: same ? saved.emailComment : (st.emailComment ?? false),
+      reviewBuys: same ? saved.reviewBuys !== false : (st.reviewBuys ?? true),
       apiKey: undefined,
       authToken: undefined,
       keyView: same ? saved.apiKey : undefined,
@@ -589,13 +609,13 @@ function renderAI() {
     "div",
     { class: "panel" },
     h("h2", { class: "h2" }, "第 3 步：AI 分析（可选）"),
-    h("p", { class: "muted small" }, "AI 用来识别持仓截图、解读信号，可选在提醒中附带点评。买卖数量始终由规则引擎计算，不依赖 AI。"),
+    h("p", { class: "muted small" }, "AI 用来对买入信号做决策（结合近 60 个交易日走势判断执行还是暂缓）、识别持仓截图、解读信号。买卖数量始终由规则引擎计算，AI 不改动。"),
     box,
     stepFooter({
       save: () =>
         api("/api/setup/ai", {
           ai: st.provider
-            ? { provider: st.provider, apiKey: st.apiKey, authToken: st.authToken, model: st.model, baseURL: st.baseURL, emailComment: st.emailComment }
+            ? { provider: st.provider, apiKey: st.apiKey, authToken: st.authToken, model: st.model, baseURL: st.baseURL, emailComment: st.emailComment, reviewBuys: st.reviewBuys }
             : null,
         }),
       back: "notify",
@@ -662,7 +682,12 @@ function aiFields(st, loadFields, redraw) {
     choices,
     h("div", { class: "form-grid" }, fields),
     ...more,
-    h("div", { class: "checks" }, checkbox(st, "emailComment", "提醒中附带 AI 点评（每次提醒调用一次 AI，可能产生费用）")),
+    h(
+      "div",
+      { class: "checks" },
+      checkbox(st, "reviewBuys", "买入信号先由 AI 决策（执行 / 暂缓），结论随提醒发送"),
+      checkbox(st, "emailComment", "提醒中附带 AI 点评（每次提醒调用一次 AI，可能产生费用）"),
+    ),
   ];
 }
 
@@ -692,9 +717,9 @@ function renderDone() {
       h(
         "li",
         {},
-        "控制台本身不会定时发送提醒。要在交易时段自动检查并提醒，在终端运行：",
+        "保持控制台（gridbot serve）运行，就会在交易时段按间隔自动检查并发送提醒；监控页顶部可以看到上次检查结果。也可以不开网页，单独运行 ",
         cmd("gridbot run"),
-        h("span", { class: "muted small" }, "（没有全局安装时用 node dist/cli/index.js run）"),
+        "。",
       ),
       h("li", {}, "不想让电脑一直开着？可以用 GitHub Actions 免费定时运行，见 docs/github-actions.md。"),
     ),

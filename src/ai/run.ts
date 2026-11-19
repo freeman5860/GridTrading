@@ -171,6 +171,12 @@ async function finish(
 
   const market = normalizeSymbol(holding.symbol).market;
   const fx = holding.connect ? await fetchFx(signal) : undefined;
-  const evaluation = evaluate(holding, { price, lotSize: quote?.lotSize ?? MARKETS[market].defaultLot }, state, { fx });
+  let evaluation;
+  try {
+    evaluation = evaluate(holding, { price, lotSize: quote?.lotSize ?? MARKETS[market].defaultLot }, state, { fx });
+  } catch (e) {
+    problems.push((e as Error).message);
+    return { holding, quote, extraction, problems, source };
+  }
   return { holding, quote, evaluation, extraction, problems, source };
 }

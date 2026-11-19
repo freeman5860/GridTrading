@@ -113,6 +113,7 @@ footer { padding: 8px 0 24px; }
 .price .big { font-size: 22px; font-weight: 650; line-height: 1.2; }
 .kv { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 12px; font-size: 13px; }
 .kv div span { display: block; color: var(--muted); font-size: 12px; }
+.kv div span.sub { font-size: 11px; }
 
 /* 档位刻度 */
 .ladder { position: relative; height: 34px; margin: 4px 6px 0; }
@@ -123,6 +124,19 @@ footer { padding: 8px 0 24px; }
 .ladder .marker { position: absolute; top: 4px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: var(--accent); border: 2px solid var(--panel); box-shadow: 0 0 0 1px var(--accent); }
 .ladder .zero { position: absolute; top: 6px; height: 20px; width: 1px; background: var(--fg); opacity: 0.35; }
 
+.monitor { display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 14px; font-size: 14px; }
+.monitor .light { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.monitor.on .light { background: var(--down); box-shadow: 0 0 0 3px color-mix(in srgb, var(--down) 20%, transparent); }
+.monitor.bad { border-color: color-mix(in srgb, var(--warn) 50%, var(--line)); }
+.monitor.bad .light { background: var(--warn); }
+.monitor-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.review { padding: 8px 10px; border-radius: 8px; background: var(--soft); font-size: 14px; border-left: 3px solid var(--muted); }
+.review.execute { border-left-color: var(--down); }
+.review.execute b { color: var(--down); }
+.review.hold { border-left-color: var(--warn); }
+.review.hold b { color: var(--warn); }
+.signals.alerted { border-left: 3px solid var(--up); padding-left: 10px; }
+.alerted-head { color: var(--up); font-weight: 600; }
 .signals { display: flex; flex-direction: column; gap: 6px; }
 .signal { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--soft); font-size: 14px; flex-wrap: wrap; }
 .signal .act { font-weight: 700; }

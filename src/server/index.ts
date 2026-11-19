@@ -10,10 +10,11 @@ import { createRequire } from "node:module";
 import { analyzePrompt, analyzeSystemPrompt, loadRulesText, MAX_IMAGES } from "../ai/analyze.js";
 import { complete, createAIClient, errorMessage, PROVIDER_INFO, type ImageInput } from "../ai/providers.js";
 import { prepareAnalysis } from "../ai/run.js";
-import { prepareCheck } from "../check.js";
+import { fetchFx, prepareCheck } from "../check.js";
 import { ConfigError, loadConfig, updateHoldingInFile, type Config, type HoldingPatch } from "../config.js";
 import { MARKETS, normalizeSymbol } from "../core/symbol.js";
 import type { Quote } from "../core/types.js";
+import { estimateFill } from "../core/fill.js";
 import { describeSessions, isMarketOpen, localTime, nextOpen } from "../market/hours.js";
 import { ALL_MARKETS, describeNextOpen } from "../scheduler.js";
 import { channelName } from "../notify/webhook.js";
@@ -22,11 +23,14 @@ import { getQuoteSource } from "../market/source.js";
 import { renderTestEmail } from "../notify/render.js";
 import { notifierFor } from "../scheduler.js";
 import { readSetup, saveAI, saveNotify, saveWatchlist } from "./setup.js";
+import { disabledMonitor, type Monitor } from "./monitor.js";
 
 export interface ServeOptions {
   configPath: string;
   host: string;
   port: number;
+  /** 内置定时监控（不开启时只能手动查看） */
+  monitor?: Monitor;
 }
 
 const WEB_DIR = new URL("../../web/", import.meta.url);
@@ -133,7 +137,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, opts: ServeOpti
   }
 
   const route = `${method} ${url.pathname}`;
-  if (route === "GET /api/status") return sendJson(res, 200, await status(opts.configPath));
+  const monitor = opts.monitor ?? disabledMonitor;
+  if (route === "GET /api/status") return sendJson(res, 200, { ...(await status(opts.configPath)), monitor: monitor.status() });
+  if (route === "POST /api/monitor/check") return sendJson(res, 200, await monitor.checkNow());
   if (route === "GET /api/rules") return sendJson(res, 200, { markdown: await loadRulesText() });
   if (route === "POST /api/analyze") return analyze(req, res, opts.configPath);
   if (route === "GET /api/quote") return sendJson(res, 200, await quote(opts.configPath, url.searchParams.get("symbols") ?? ""));
@@ -146,12 +152,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, opts: ServeOpti
   if (route === "POST /api/setup/test-notify") return sendJson(res, 200, await testNotify(opts.configPath));
   if (route === "POST /api/setup/test-ai") return sendJson(res, 200, await testAI(opts.configPath));
 
-  const m = url.pathname.match(/^\/api\/holdings\/([^/]+)(\/execute|\/reset)?$/);
+  const m = url.pathname.match(/^\/api\/holdings\/([^/]+)(\/execute|\/reset|\/dismiss)?$/);
   if (m && method === "POST") {
     const symbol = normalizeSymbol(decodeURIComponent(m[1]!)).symbol;
     const body = await readJson(req, 64 * 1024);
     if (m[2] === "/execute") return sendJson(res, 200, await execute(opts.configPath, symbol, body));
     if (m[2] === "/reset") return sendJson(res, 200, await reset(opts.configPath, symbol));
+    if (m[2] === "/dismiss") return sendJson(res, 200, await dismiss(opts.configPath, symbol));
     return sendJson(res, 200, await updateHolding(opts.configPath, symbol, body));
   }
 
@@ -243,18 +250,40 @@ async function updateHolding(configPath: string, symbol: string, body: Record<st
  */
 async function execute(configPath: string, symbol: string, body: Record<string, unknown>) {
   const config = await loadConfig(configPath);
-  if (!config.watchlist.some((h) => h.symbol === symbol)) throw new HttpError(404, `配置中没有 ${symbol}`);
+  const holding = config.watchlist.find((h) => h.symbol === symbol);
+  if (!holding) throw new HttpError(404, `配置中没有 ${symbol}`);
+  const state = await loadState(config.statePath);
+  const alerted = state.symbols[symbol]?.alerted;
   const { result } = await prepareCheck(config);
   const item = result.items.find((i) => i.holding.symbol === symbol);
-  if (!item?.evaluation) throw new HttpError(409, item?.error ?? item?.skipped ?? "无法计算该标的");
-  if (!item.evaluation.signals.length) throw new HttpError(409, "当前没有交易信号，无需确认成交");
+  const ev = item?.evaluation;
 
-  const position = numberField(body, "position") ?? item.evaluation.positionAfter;
-  const state = await loadState(config.statePath);
-  state.symbols[symbol] = { ...item.evaluation.nextState, updatedAt: new Date().toISOString() };
+  // 本次确认的信号：已提醒、待确认的 + 当前新产生的
+  const signals = [...(alerted?.signals ?? []), ...(ev?.signals ?? [])];
+  if (!signals.length) throw new HttpError(409, item?.error ?? item?.skipped ?? "当前没有交易信号，无需确认成交");
+  if (ev?.signals.length) state.symbols[symbol] = { ...ev.nextState, updatedAt: new Date().toISOString() };
+  if (state.symbols[symbol]) delete state.symbols[symbol]!.alerted;
+
+  // 默认按全部成交估算；用户可以填写实际成交后的持仓、可用资金和基准价
+  const est = estimateFill(holding, signals, numberField(body, "position"));
+  const patch: HoldingPatch = {
+    position: est.position,
+    cash: body.cash === null ? null : (numberField(body, "cash") ?? est.cash),
+    basePrice: numberField(body, "basePrice", { positive: true }) ?? est.basePrice,
+  };
+  // 先写配置（会校验），再保存状态
+  await updateHoldingInFile(configPath, symbol, patch);
   await saveState(config.statePath, state);
-  await updateHoldingInFile(configPath, symbol, { position });
-  return { ok: true, position };
+  return { ok: true, ...patch };
+}
+
+/** 忽略已提醒的信号（没有成交）：只清除待确认记录，档位仍算已触发 */
+async function dismiss(configPath: string, symbol: string) {
+  const config = await loadConfig(configPath);
+  const state = await loadState(config.statePath);
+  if (state.symbols[symbol]) delete state.symbols[symbol]!.alerted;
+  await saveState(config.statePath, state);
+  return { ok: true };
 }
 
 async function reset(configPath: string, symbol: string) {
@@ -332,6 +361,8 @@ async function quote(configPath: string, input: string) {
   });
   const symbols = parsed.flatMap((p) => (p.symbol ? [p.symbol] : []));
   let quotes = new Map<string, Quote>();
+  // 有港股时附带港元兑人民币汇率，供港股通标的把现价折算成人民币基准价
+  const fx = symbols.some((s) => s.startsWith("hk")) ? fetchFx() : undefined;
   if (symbols.length) {
     try {
       quotes = await getQuoteSource(source).fetchQuotes(symbols, { timeoutMs: 10_000 });
@@ -340,6 +371,7 @@ async function quote(configPath: string, input: string) {
     }
   }
   return {
+    fx: await fx,
     quotes: parsed.map((p) => {
       if (!p.symbol) return p;
       const q = quotes.get(p.symbol);

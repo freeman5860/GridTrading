@@ -3,7 +3,7 @@
 import type { CheckItem, CheckResult } from "../check.js";
 import { formatPct } from "../core/engine.js";
 import { MARKETS } from "../core/symbol.js";
-import type { Signal } from "../core/types.js";
+import type { Evaluation, Signal } from "../core/types.js";
 
 export interface RenderedEmail {
   subject: string;
@@ -22,6 +22,12 @@ const actionText = (s: Signal) => (s.action === "buy" ? "买入" : "卖出");
 const itemName = (i: CheckItem) => i.quote?.name ?? i.holding.name ?? i.holding.symbol;
 
 const marketLabel = (i: CheckItem) => (i.holding.connect ? "港股通" : MARKETS[i.quote!.market].name);
+const baseText = (ev: Evaluation) => (ev.basePriceHkd !== undefined ? `${num(ev.basePrice)} 元（≈ ${num(ev.basePriceHkd)} HKD）` : num(ev.basePrice));
+const REVIEW_TEXT = { execute: "建议执行", hold: "建议暂缓", error: "决策失败" } as const;
+/** 同一标的的买入信号共用一个 AI 决策 */
+const itemReview = (i: CheckItem) => i.evaluation!.signals.find((s) => s.review)?.review;
+const reviewLine = (r: NonNullable<Signal["review"]>) =>
+  r.decision === "error" ? `AI 决策：${r.reason}` : `AI 决策：${REVIEW_TEXT[r.decision]}${r.by ? `（${r.by}）` : ""}——${r.reason}`;
 const cny = (s: Signal) => (s.amountCny !== undefined ? `（约 ${money(s.amountCny)} 元）` : "");
 
 export function signalItems(result: CheckResult): CheckItem[] {
@@ -35,7 +41,8 @@ export function renderSignalEmail(result: CheckResult, opts: { comment?: string;
   // 主题：最多列出 3 个标的的第一个动作，例如 "沪深300ETF 买入 1000、腾讯控股 卖出 100"
   const brief = items.slice(0, 3).map((i) => {
     const s = i.evaluation!.signals[0]!;
-    return `${itemName(i)} ${actionText(s)} ${s.quantity}`;
+    const r = itemReview(i);
+    return `${itemName(i)} ${actionText(s)} ${s.quantity}${r && r.decision !== "error" ? `（AI ${REVIEW_TEXT[r.decision]}）` : ""}`;
   });
   const subject =
     `【gridbot】${result.signalCount} 个交易信号：${brief.join("、")}` + (items.length > 3 ? ` 等 ${items.length} 个标的` : "");
@@ -48,10 +55,11 @@ export function renderSignalEmail(result: CheckResult, opts: { comment?: string;
       const q = i.quote!;
       return [
         `■ ${itemName(i)}（${i.holding.symbol}，${marketLabel(i)}）`,
-        `  现价 ${num(q.price)} ${q.currency}，基准价 ${num(ev.basePrice)}，相对基准 ${formatPct(ev.change)}`,
+        `  现价 ${num(q.price)} ${q.currency}，基准价 ${baseText(ev)}，相对基准 ${formatPct(ev.change)}`,
         ...ev.signals.map(
           (s) => `  ${actionText(s)} ${s.quantity} @ ${num(s.price)}，约 ${money(s.amount)} ${q.currency}${cny(s)}（${s.reason}）`,
         ),
+        ...(itemReview(i) ? [`  ${reviewLine(itemReview(i)!)}`] : []),
         `  执行后预计持仓：${i.holding.position} → ${ev.positionAfter}，成交后请更新配置中的 position`,
         ...ev.notes.filter((n) => n.level === "warn").map((n) => `  ⚠ ${n.text}`),
         "",
@@ -83,11 +91,17 @@ export function renderSignalEmail(result: CheckResult, opts: { comment?: string;
     const chgColor = ev.change > 0 ? "#d6332b" : ev.change < 0 ? "#1a8f4c" : "#555";
     return `<div style="border:1px solid #e5e7eb;border-radius:10px;padding:14px 16px;margin:0 0 14px">
   <div style="font-size:16px;font-weight:600">${esc(itemName(i))} <span style="color:#888;font-weight:400;font-size:13px">${esc(i.holding.symbol)} · ${marketLabel(i)}</span></div>
-  <div style="margin:6px 0 10px;color:#444;font-size:14px">现价 <b>${num(q.price)}</b> ${q.currency} · 基准价 ${num(ev.basePrice)} · 相对基准 <b style="color:${chgColor}">${formatPct(ev.change)}</b></div>
+  <div style="margin:6px 0 10px;color:#444;font-size:14px">现价 <b>${num(q.price)}</b> ${q.currency} · 基准价 ${baseText(ev)} · 相对基准 <b style="color:${chgColor}">${formatPct(ev.change)}</b></div>
   <table style="border-collapse:collapse;width:100%;font-size:14px">
     <tr style="background:#f6f7f9;color:#666"><th style="padding:6px 8px;text-align:left">操作</th><th style="padding:6px 8px;text-align:right">数量</th><th style="padding:6px 8px;text-align:right">参考价</th><th style="padding:6px 8px;text-align:right">金额</th><th style="padding:6px 8px;text-align:left">规则</th></tr>
     ${rows}
   </table>
+  ${(() => {
+    const r = itemReview(i);
+    if (!r) return "";
+    const color = r.decision === "execute" ? "#1a8f4c" : r.decision === "hold" ? "#b45309" : "#888";
+    return `<div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:#f6f7f9;font-size:14px"><b style="color:${color}">AI 决策：${r.decision === "error" ? "失败" : REVIEW_TEXT[r.decision]}</b>${r.by ? `<span style="color:#888;font-size:12px">（${esc(r.by)}）</span>` : ""}<div style="color:#444;margin-top:2px">${esc(r.reason)}</div></div>`;
+  })()}
   <div style="margin-top:8px;color:#666;font-size:13px">执行后预计持仓：${i.holding.position} → <b>${ev.positionAfter}</b>，成交后请更新配置中的 position</div>
   ${warns}
 </div>`;

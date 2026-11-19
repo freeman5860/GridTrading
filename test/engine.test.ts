@@ -83,6 +83,16 @@ describe("第一层：分档仓位管理", () => {
     expect(again.notes.some((n) => n.text.includes("新一轮"))).toBe(true);
   });
 
+  it("未清仓时修改基准价：已触发档位保留，不重复提醒；之后的档位按新基准价计算", () => {
+    const h: Holding = { symbol: "usX", basePrice: 10, position: 100 };
+    const first = evaluate(h, lot1(8.4)).nextState; // −16%，触发 −15%
+    expect(first.triggered).toEqual(["down15"]);
+    const moved = evaluate({ ...h, basePrice: 9.8, position: 110 }, lot1(8.3), first);
+    expect(moved.signals).toEqual([]);
+    expect(moved.nextState).toMatchObject({ basePrice: 9.8, triggered: ["down15"] });
+    expect(moved.nextTiers.down).toEqual({ id: "down25", price: 7.35 });
+  });
+
   it("跳涨 +40% 同时执行 +25% 和 +35% 两档", () => {
     const ev = evaluate({ symbol: "usX", basePrice: 10, position: 1000 }, lot1(14));
     expect(ev.signals.map((s) => s.quantity)).toEqual([100, 180]);

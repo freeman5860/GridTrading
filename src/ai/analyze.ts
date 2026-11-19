@@ -191,7 +191,7 @@ export function stateFromTriggered(holding: Holding, triggered?: string[] | null
 export function describeEvaluation(holding: Holding, quote: Pick<Quote, "price" | "lotSize" | "currency" | "market" | "time"> | undefined, ev: Evaluation): string {
   const lines = [
     `标的：${holding.name ?? ""} ${holding.symbol}${quote ? `（${holding.connect ? "港股通买入的港股" : MARKETS[quote.market].name}，每手 ${quote.lotSize}，价格单位 ${quote.currency}）` : ""}`,
-    `现价 ${ev.price}${quote?.time ? `（行情时间 ${quote.time}）` : ""}，基准价 ${ev.basePrice}，相对基准 ${formatPct(ev.change)}`,
+    `现价 ${ev.price}${quote?.time ? `（行情时间 ${quote.time}）` : ""}，基准价 ${ev.basePriceHkd !== undefined ? `${ev.basePrice} 人民币（按汇率折合 ${ev.basePriceHkd} 港元）` : ev.basePrice}，相对基准 ${formatPct(ev.change)}${ev.basePriceHkd !== undefined ? "（按人民币计，含汇率变化）" : ""}`,
     `当前持仓 ${holding.position}${holding.cash !== undefined ? `，可用资金 ${holding.cash}${holding.connect ? " 人民币" : ""}` : "，可用资金未知"}`,
     ...(ev.fx ? [`港元兑人民币汇率 ${ev.fx.rate}（港股通买入按约高 3% 的参考汇率冻结资金，实际以结算汇率为准）`] : []),
   ];
@@ -214,7 +214,7 @@ export function describeEvaluation(holding: Holding, quote: Pick<Quote, "price" 
     ev.grid?.nextBuy !== undefined && `网格买 ${ev.grid.nextBuy}`,
     ev.grid?.nextSell !== undefined && `网格卖 ${ev.grid.nextSell}`,
   ].filter(Boolean);
-  if (next.length) lines.push(`下一触发价：${next.join("、")}`);
+  if (next.length) lines.push(`下一触发价${ev.basePriceHkd !== undefined ? "（港元）" : ""}：${next.join("、")}`);
   for (const n of ev.notes) lines.push(`${n.level === "warn" ? "注意" : "说明"}：${n.text}`);
   return lines.join("\n");
 }

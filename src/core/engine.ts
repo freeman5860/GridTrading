@@ -67,32 +67,42 @@ export function evaluate(holding: Holding, quote: Pick<Quote, "price" | "lotSize
   return evaluateLocal(holding, quote, prev);
 }
 
-/** 港股通：人民币资金和手续费折算成港元后计算，信号附带人民币金额 */
+/**
+ * 港股通：基准价、可用资金、手续费为人民币（与港股通账户显示的成本价一致），行情和下单价格为港元。
+ * 按实时汇率把人民币折算成港元后用同一套规则计算，相当于用人民币计价的涨跌幅判断档位（包含汇率变化）。
+ * 网格价位是挂单价，仍按港元填写。状态中的基准价保留人民币原值，避免汇率每天变化导致档位被重置。
+ */
 function evaluateConnect(holding: Holding, quote: Pick<Quote, "price" | "lotSize">, prev: SymbolState | undefined, fx: FxRate | undefined): Evaluation {
+  if (!(fx && fx.rate > 0)) throw new Error("港股通标的的基准价为人民币，需要港元兑人民币汇率：获取汇率失败，本次无法计算");
+  const rate = fx.rate;
+  const buyRate = rate * (1 + CONNECT_FX_BUFFER);
+  const baseHkd = holding.basePrice / rate;
+
+  const local: Holding = { ...holding, basePrice: baseHkd };
   const extra: Note[] = [];
-  let local: Holding = { ...holding };
-  if (fx && fx.rate > 0) {
-    const buyRate = fx.rate * (1 + CONNECT_FX_BUFFER);
-    if (holding.cash !== undefined) {
-      local.cash = holding.cash / buyRate;
-      extra.push({
-        level: "info",
-        text: `港股通：可用资金 ${round(holding.cash, 2)} 元按买入参考汇率约 ${round(buyRate)} 折合 ${round(local.cash, 2)} 港元`,
-      });
-    }
-    if (holding.fee) local.fee = { ...holding.fee, min: holding.fee.min / fx.rate };
-  } else {
-    if (holding.cash !== undefined) {
-      local = { ...local, cash: undefined };
-      extra.push({ level: "warn", text: "港股通：没有获取到港元汇率，本次不按可用资金（人民币）限制买入数量，请自行核对资金" });
-    }
+  if (holding.cash !== undefined) local.cash = holding.cash / buyRate;
+  if (holding.fee) local.fee = { ...holding.fee, min: holding.fee.min / rate };
+
+  // 上次状态的基准价也是人民币，折算成港元交给同一套规则（基准价变化的处理与普通标的一致）
+  const prevLocal = prev ? { ...structuredClone(prev), basePrice: prev.basePrice / rate } : undefined;
+
+  const ev = evaluateLocal(local, quote, prevLocal);
+  for (const n of ev.notes) {
+    if (prev && n.text.startsWith("基准价由 ")) n.text = n.text.replace(/^基准价由 [\d.]+ 改为 [\d.]+/, `基准价由 ${prev.basePrice} 元改为 ${holding.basePrice} 元`);
   }
-  const ev = evaluateLocal(local, quote, prev);
-  ev.notes.push(...extra);
-  if (fx && fx.rate > 0) {
-    ev.fx = fx;
-    for (const s of ev.signals) s.amountCny = round(s.amount * fx.rate * (s.action === "buy" ? 1 + CONNECT_FX_BUFFER : 1 - CONNECT_FX_BUFFER), 2);
-  }
+  extra.push({
+    level: "info",
+    text:
+      `港股通：基准价 ${holding.basePrice} 元按汇率 ${rate} 折合 ${round(baseHkd, 3)} 港元` +
+      (holding.cash !== undefined ? `；可用资金 ${round(holding.cash, 2)} 元按买入参考汇率约 ${round(buyRate)} 折合 ${round(local.cash!, 2)} 港元` : ""),
+  });
+  ev.notes.unshift(...extra);
+  ev.basePrice = holding.basePrice;
+  ev.basePriceHkd = round(baseHkd, 4);
+  ev.nextState = { ...ev.nextState, basePrice: holding.basePrice };
+  ev.fx = fx;
+  for (const s of ev.signals) s.fxRate = rate;
+  for (const s of ev.signals) s.amountCny = round(s.amount * rate * (s.action === "buy" ? 1 + CONNECT_FX_BUFFER : 1 - CONNECT_FX_BUFFER), 2);
   return ev;
 }
 
@@ -102,11 +112,17 @@ function evaluateLocal(holding: Holding, quote: Pick<Quote, "price" | "lotSize">
   const lot = quote.lotSize > 0 ? quote.lotSize : 1;
   const price = quote.price;
 
-  // 配置中的基准价变化 → 视为新一轮，已触发档位清零（网格状态保留）
+  // 配置中的基准价变化（如加仓后改成新的持仓成本）：已触发档位保留，不会重复提醒；
+  // 只有本轮已 +100% 清仓时，重设基准价才开始新一轮。其他情况要重新开始请用"重置档位"。
   let state: SymbolState = prev ? structuredClone(prev) : initialState(holding);
   if (Math.abs(state.basePrice - holding.basePrice) > EPS) {
-    if (prev) notes.push({ level: "info", text: `基准价由 ${prev.basePrice} 改为 ${holding.basePrice}，开始新一轮，已触发档位清零` });
-    state = { ...state, basePrice: holding.basePrice, triggered: [], completed: false };
+    if (prev?.completed) {
+      notes.push({ level: "info", text: `基准价由 ${prev.basePrice} 改为 ${holding.basePrice}，上一轮已清仓，开始新一轮` });
+      state = { ...state, basePrice: holding.basePrice, triggered: [], completed: false };
+    } else {
+      if (prev?.triggered.length) notes.push({ level: "info", text: `基准价由 ${prev.basePrice} 改为 ${holding.basePrice}，已触发档位保留（要重新开始一轮请重置档位）` });
+      state = { ...state, basePrice: holding.basePrice };
+    }
   }
 
   const base = holding.basePrice;

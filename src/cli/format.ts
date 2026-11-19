@@ -2,7 +2,7 @@ import { styleText } from "node:util";
 import type { CheckItem, CheckResult } from "../check.js";
 import { formatPct } from "../core/engine.js";
 import { MARKETS } from "../core/symbol.js";
-import type { Quote, Signal } from "../core/types.js";
+import type { Evaluation, Quote, Signal } from "../core/types.js";
 
 const color = process.stdout.isTTY && !process.env.NO_COLOR;
 type Style = Parameters<typeof styleText>[0];
@@ -16,6 +16,9 @@ const money = (n: number, cur: string) => `${n.toLocaleString("zh-CN", { maximum
 
 // A 股习惯：涨红跌绿；买入红、卖出绿（与网格示意图一致）
 const changeStyle = (x: number): Style => (x > 0 ? "red" : x < 0 ? "green" : "gray");
+
+/** 港股通的基准价是人民币，附带折算的港元 */
+const baseText = (ev: Evaluation) => (ev.basePriceHkd !== undefined ? `${num(ev.basePrice)} 元（≈ ${num(ev.basePriceHkd)} HKD）` : num(ev.basePrice));
 
 function signalLine(sig: Signal, cur: string) {
   const tag = sig.action === "buy" ? s(["bold", "red"], "买入") : s(["bold", "green"], "卖出");
@@ -41,13 +44,18 @@ export function formatItem(item: CheckItem): string {
 
   const cur = quote.currency;
   lines.push(
-    `  现价 ${s("bold", num(quote.price))} ${cur}  基准价 ${num(ev.basePrice)}  ` +
+    `  现价 ${s("bold", num(quote.price))} ${cur}  基准价 ${baseText(ev)}  ` +
       `相对基准 ${s(changeStyle(ev.change), formatPct(ev.change))}  ` +
       s("gray", `${holding.connect ? "港股通" : MARKETS[quote.market].name} · 每手 ${quote.lotSize} · ${quote.time}`),
   );
 
   if (ev.signals.length) {
     for (const sig of ev.signals) lines.push(signalLine(sig, cur));
+    const review = ev.signals.find((x) => x.review)?.review;
+    if (review) {
+      const label = { execute: s("green", "建议执行"), hold: s("yellow", "建议暂缓"), error: s("gray", "决策失败") }[review.decision];
+      lines.push(`  AI 决策：${label}${review.by ? s("gray", `（${review.by}）`) : ""} ${review.reason}`);
+    }
     lines.push(s("gray", `  执行后预计持仓：${holding.position} → ${ev.positionAfter}（交易后请更新配置中的 position）`));
   } else {
     lines.push(s("gray", "  不操作"));

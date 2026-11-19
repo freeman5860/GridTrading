@@ -114,6 +114,8 @@ const configSchema = z.object({
       baseURL: optionalString,
       /** 信号邮件中附带 AI 点评 */
       emailComment: z.boolean().default(false),
+      /** 买入信号发送提醒前由 AI 决策（执行 / 暂缓） */
+      reviewBuys: z.boolean().default(true),
     })
     .optional(),
 });
@@ -263,6 +265,7 @@ schedule:
 #   # model: qwen3          # 识别截图需要视觉模型，如 qwen2.5vl
 #   # baseURL: http://127.0.0.1:11434/v1   # 默认 Ollama；LM Studio 为 :1234/v1，vLLM 为 :8000/v1
 #   emailComment: false    # true 时信号邮件附带 AI 点评
+#   reviewBuys: true       # 买入信号发送提醒前由 AI 决策"执行 / 暂缓"（默认开启，配置了 ai 才生效）
 
 watchlist:
   # A 股场内 ETF：只用第一层分档仓位管理
@@ -277,7 +280,7 @@ watchlist:
     basePrice: 24.5
     position: 2000
     cash: 30000            # 港币
-    # connect: true        # 通过港股通买入时打开：cash 和手续费改为人民币，按实时汇率折算；价格仍为港元
+    # connect: true        # 通过港股通买入时打开：basePrice、cash、手续费改为人民币（与港股通账户一致），按实时汇率折算；网格价格仍为港元
 
   # 美股：同时启用第二层区间小网格
   - symbol: usQQQ          # 也可写 QQQ

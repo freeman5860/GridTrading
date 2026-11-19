@@ -131,13 +131,51 @@ describe("接口", () => {
 
   it("已按信号成交：记录档位并更新持仓；没有信号时拒绝", async () => {
     const res = await post("/api/holdings/sh510300/execute", {});
-    expect(await res.json()).toEqual({ ok: true, position: 11000 });
+    // 买入 1000 @ 3.4：持仓 11000，成本 (4×10000 + 3.4×1000) / 11000 ≈ 3.945（没配置 cash 时不改资金）
+    expect(await res.json()).toEqual({ ok: true, position: 11000, basePrice: 3.945 });
     const state = JSON.parse(await readFile(path.join(dir, ".gridbot/state.json"), "utf8"));
     expect(state.symbols.sh510300.triggered).toEqual(["down15"]);
     expect(await readFile(configPath, "utf8")).toContain("position: 11000");
 
     expect((await post("/api/holdings/sh510300/execute", {})).status).toBe(409);
     expect((await post("/api/holdings/hk02800/execute", {})).status).toBe(409);
+  });
+
+  it("定时检查提醒过的信号：页面不再显示为新信号，但可以确认成交或忽略", async () => {
+    const { runCheck } = await import("../src/check.js");
+    const { loadConfig } = await import("../src/config.js");
+    await runCheck(await loadConfig(configPath)); // 模拟定时检查发送提醒后保存状态
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data: any = await (await fetch(base + "/api/status")).json();
+    expect(data.check.signalCount).toBe(0);
+    expect(data.state.sh510300.alerted).toMatchObject({ positionAfter: 11000 });
+
+    expect(await (await post("/api/holdings/sh510300/execute", { position: 10900, basePrice: 3.95 })).json()).toEqual({ ok: true, position: 10900, basePrice: 3.95 });
+    let state = JSON.parse(await readFile(path.join(dir, ".gridbot/state.json"), "utf8"));
+    expect(state.symbols.sh510300.alerted).toBeUndefined();
+    expect(state.symbols.sh510300.triggered).toEqual(["down15"]);
+    expect(await readFile(configPath, "utf8")).toContain("position: 10900");
+    // 改了基准价也不会重复提醒
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const after: any = await (await fetch(base + "/api/status")).json();
+    expect(after.check.signalCount).toBe(0);
+    expect((await post("/api/holdings/sh510300/execute", {})).status).toBe(409);
+
+    // 忽略：持仓不变，档位仍算已触发
+    await writeFile(configPath, CONFIG);
+    await rm(path.join(dir, ".gridbot"), { recursive: true, force: true });
+    await runCheck(await loadConfig(configPath));
+    expect((await post("/api/holdings/sh510300/dismiss", {})).status).toBe(200);
+    state = JSON.parse(await readFile(path.join(dir, ".gridbot/state.json"), "utf8"));
+    expect(state.symbols.sh510300).toMatchObject({ triggered: ["down15"] });
+    expect(state.symbols.sh510300.alerted).toBeUndefined();
+    expect(await readFile(configPath, "utf8")).toContain("position: 10000");
+  });
+
+  it("没有开启监控时状态中说明", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data: any = await (await fetch(base + "/api/status")).json();
+    expect(data.monitor).toMatchObject({ enabled: false });
   });
 
   it("部分成交时使用用户填写的持仓", async () => {

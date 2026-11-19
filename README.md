@@ -9,7 +9,7 @@
 功能：
 
 - **监控**：`gridbot run` 在各市场交易时段内定时检查，有信号时通过邮件、企业微信、钉钉、飞书、Telegram、Bark、Server酱提醒。
-- **控制台**：`gridbot serve` 启动本地网页，查看持仓和信号，成交后一键更新持仓，上传截图让 AI 分析。
+- **控制台**：`gridbot serve` 启动本地网页，按向导配置持仓、提醒渠道和 AI，查看持仓和信号，成交后一键更新持仓，上传截图让 AI 分析。控制台运行时也会在交易时段定时检查并发送提醒（与 `gridbot run` 相同，可用 `--no-monitor` 关闭）。
 - **免服务器**：用 GitHub Actions 定时运行，见 [docs/github-actions.md](docs/github-actions.md)。
 - **AI**：支持 Claude / ChatGPT（含 OpenAI 兼容服务）/ Gemini / 本地部署的模型（如 Ollama 上的 Qwen），负责识别截图和解读信号，不参与计算。
 
@@ -44,7 +44,8 @@ gridbot check               # 拉取行情并检查
 | `gridbot analyze -s 510300` | AI 解读配置中某个标的的当前状态 |
 | `gridbot notify-test` | 向所有提醒渠道发送测试消息，逐个显示结果 |
 | `gridbot markets` | 查看各市场是否开盘、交易时段和下次开盘时间 |
-| `gridbot serve` | 启动本地网页控制台（默认 http://127.0.0.1:8686） |
+| `gridbot serve` | 启动本地网页控制台（默认 http://127.0.0.1:8686），同时定时检查并提醒 |
+| `gridbot serve --no-monitor` | 只启动控制台，不定时检查（提醒已由 `gridbot run` / GitHub Actions 负责时使用） |
 | `gridbot quote 510300 700 AAPL` | 查询实时行情 |
 | `gridbot reset <代码…>` / `--all` | 清除状态，开始新一轮 |
 
@@ -75,11 +76,11 @@ watchlist:
       size: 5
 ```
 
-**港股通**：通过港股通买入的港股，加上 `connect: true`。价格、基准价、网格仍按港元填写，`cash`（可用资金）和手续费按人民币填写。gridbot 会实时获取港元兑人民币汇率，按买入参考汇率（中间价约 +3%）估算资金够买多少，信号附带人民币金额；内地休市日港股通不交易，定时检查会自动跳过。
+**港股通**：通过港股通买入的港股，加上 `connect: true`。基准价、`cash`（可用资金）和手续费按人民币填写，与港股通账户显示的成本价一致；网格价格是挂单价，仍按港元填写。gridbot 会实时获取港元兑人民币汇率，把人民币基准价折算成港元比较（相当于按人民币计算涨跌幅，包含汇率变化），按买入参考汇率（中间价约 +3%）估算资金够买多少，信号附带人民币金额；内地休市日港股通不交易，定时检查会自动跳过。获取不到汇率时，港股通标的本次不计算。
 
 ```yaml
   - symbol: hk00700
-    basePrice: 400         # 港元
+    basePrice: 340         # 人民币
     position: 1000
     cash: 50000            # 人民币
     connect: true
