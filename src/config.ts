@@ -114,9 +114,12 @@ const configSchema = z.object({
       baseURL: optionalString,
       /** 信号邮件中附带 AI 点评 */
       emailComment: z.boolean().default(false),
-      /** 买入信号发送提醒前由 AI 决策（执行 / 暂缓） */
-      reviewBuys: z.boolean().default(true),
+      /** 交易信号发送提醒前由 AI 决策（执行 / 减量 / 暂缓） */
+      review: z.boolean().optional(),
+      /** 旧名称，等同于 review */
+      reviewBuys: z.boolean().optional(),
     })
+    .transform(({ reviewBuys, ...ai }) => ({ ...ai, review: ai.review ?? reviewBuys ?? true }))
     .optional(),
 });
 
@@ -265,7 +268,7 @@ schedule:
 #   # model: qwen3          # 识别截图需要视觉模型，如 qwen2.5vl
 #   # baseURL: http://127.0.0.1:11434/v1   # 默认 Ollama；LM Studio 为 :1234/v1，vLLM 为 :8000/v1
 #   emailComment: false    # true 时信号邮件附带 AI 点评
-#   reviewBuys: true       # 买入信号发送提醒前由 AI 决策"执行 / 暂缓"（默认开启，配置了 ai 才生效）
+#   review: true           # 交易信号发送提醒前由 AI 决策"执行 / 减量 / 暂缓"（默认开启，配置了 ai 才生效）
 
 watchlist:
   # A 股场内 ETF：只用第一层分档仓位管理

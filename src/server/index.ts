@@ -10,15 +10,16 @@ import { createRequire } from "node:module";
 import { analyzePrompt, analyzeSystemPrompt, loadRulesText, MAX_IMAGES } from "../ai/analyze.js";
 import { complete, createAIClient, errorMessage, PROVIDER_INFO, type ImageInput } from "../ai/providers.js";
 import { prepareAnalysis } from "../ai/run.js";
-import { fetchFx, prepareCheck } from "../check.js";
+import { fetchFx, prepareCheck, settleConfirmed } from "../check.js";
 import { ConfigError, loadConfig, updateHoldingInFile, type Config, type HoldingPatch } from "../config.js";
 import { MARKETS, normalizeSymbol } from "../core/symbol.js";
 import type { Quote } from "../core/types.js";
 import { estimateFill } from "../core/fill.js";
 import { describeSessions, isMarketOpen, localTime, nextOpen } from "../market/hours.js";
 import { ALL_MARKETS, describeNextOpen } from "../scheduler.js";
+import { dayStatus } from "../market/holidays.js";
 import { channelName } from "../notify/webhook.js";
-import { loadState, saveState } from "../state.js";
+import { loadState, saveState, type StateFile } from "../state.js";
 import { getQuoteSource } from "../market/source.js";
 import { renderTestEmail } from "../notify/render.js";
 import { notifierFor } from "../scheduler.js";
@@ -172,8 +173,10 @@ async function status(configPath: string) {
   const now = new Date();
   const markets = ALL_MARKETS.map((m) => {
     const open = isMarketOpen(m, now);
+    const day = dayStatus(m, localTime(m, now).date);
     return {
       market: m,
+      holiday: day.closed ? `${day.closed}休市` : day.halfDay ? `${day.halfDay}半日市` : undefined,
       name: MARKETS[m].name,
       open,
       localTime: localTime(m, now).hhmm,
@@ -190,12 +193,12 @@ async function status(configPath: string) {
 
   let check: Awaited<ReturnType<typeof prepareCheck>>["result"] | undefined;
   let checkError: string | undefined;
+  const state = await loadState(config.statePath);
   try {
-    check = (await prepareCheck(config)).result;
+    check = withoutPending((await prepareCheck(config)).result, state);
   } catch (e) {
     checkError = `获取行情失败：${(e as Error).message}`;
   }
-  const state = await loadState(config.statePath);
 
   return {
     now: now.toISOString(),
@@ -206,6 +209,17 @@ async function status(configPath: string) {
     checkError,
     state: state.symbols,
   };
+}
+
+/** 已在"待确认成交"中的档位信号（含 AI 暂缓中的）不再作为新信号显示 */
+function withoutPending(check: Awaited<ReturnType<typeof prepareCheck>>["result"], state: StateFile) {
+  const items = check.items.map((i) => {
+    const st = state.symbols[i.holding.symbol];
+    const pending = new Set([...(st?.alerted?.signals ?? []).filter((s) => s.layer === "tier").map((s) => s.ruleId), ...Object.keys(st?.deferred ?? {})]);
+    if (!i.evaluation || !pending.size) return i;
+    return { ...i, evaluation: { ...i.evaluation, signals: i.evaluation.signals.filter((s) => !(s.layer === "tier" && pending.has(s.ruleId))) } };
+  });
+  return { ...check, items, signalCount: items.reduce((n, i) => n + (i.evaluation?.signals.length ?? 0), 0) };
 }
 
 /** 只返回不含密钥的配置摘要 */
@@ -258,11 +272,13 @@ async function execute(configPath: string, symbol: string, body: Record<string, 
   const item = result.items.find((i) => i.holding.symbol === symbol);
   const ev = item?.evaluation;
 
-  // 本次确认的信号：已提醒、待确认的 + 当前新产生的
-  const signals = [...(alerted?.signals ?? []), ...(ev?.signals ?? [])];
+  // 本次确认的信号：已提醒、待确认的 + 当前新产生的（同一档位只算一次）
+  const known = new Set((alerted?.signals ?? []).filter((s) => s.layer === "tier").map((s) => s.ruleId));
+  const fresh = (ev?.signals ?? []).filter((s) => !(s.layer === "tier" && known.has(s.ruleId)));
+  const signals = [...(alerted?.signals ?? []), ...fresh];
   if (!signals.length) throw new HttpError(409, item?.error ?? item?.skipped ?? "当前没有交易信号，无需确认成交");
-  if (ev?.signals.length) state.symbols[symbol] = { ...ev.nextState, updatedAt: new Date().toISOString() };
-  if (state.symbols[symbol]) delete state.symbols[symbol]!.alerted;
+  if (ev && fresh.length) state.symbols[symbol] = { ...ev.nextState, alerted, deferred: state.symbols[symbol]?.deferred, updatedAt: new Date().toISOString() };
+  if (state.symbols[symbol]) settleConfirmed(state.symbols[symbol]!, signals);
 
   // 默认按全部成交估算；用户可以填写实际成交后的持仓、可用资金和基准价
   const est = estimateFill(holding, signals, numberField(body, "position"));
@@ -277,11 +293,12 @@ async function execute(configPath: string, symbol: string, body: Record<string, 
   return { ok: true, ...patch };
 }
 
-/** 忽略已提醒的信号（没有成交）：只清除待确认记录，档位仍算已触发 */
+/** 忽略已提醒的信号（没有成交）：清除待确认记录，档位算已触发（AI 暂缓的档位也不再每天重新决策），持仓不变 */
 async function dismiss(configPath: string, symbol: string) {
   const config = await loadConfig(configPath);
   const state = await loadState(config.statePath);
-  if (state.symbols[symbol]) delete state.symbols[symbol]!.alerted;
+  const st = state.symbols[symbol];
+  if (st) settleConfirmed(st, st.alerted?.signals ?? []);
   await saveState(config.statePath, state);
   return { ok: true };
 }

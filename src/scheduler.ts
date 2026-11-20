@@ -2,7 +2,7 @@
 // 每次检查前重新读取配置，交易后修改 position 不需要重启进程。
 
 import { setTimeout as sleep } from "node:timers/promises";
-import { prepareCheck, type CheckResult } from "./check.js";
+import { prepareCheck, type CheckItem, type CheckResult } from "./check.js";
 import { loadConfig, type Config } from "./config.js";
 import { MARKETS, marketOf } from "./core/symbol.js";
 import type { Market } from "./core/types.js";
@@ -11,7 +11,7 @@ import type { Notifier } from "./notify/email.js";
 import { channelsFor, combine, NotifyError, type SendReport } from "./notify/index.js";
 import { renderSignalEmail, signalItems, type RenderedEmail } from "./notify/render.js";
 import { emailComment } from "./ai/analyze.js";
-import { reviewBuys } from "./ai/review.js";
+import { reviewSignals } from "./ai/review.js";
 import { createAIClient, describeAIError, PROVIDER_INFO, type AIClient } from "./ai/providers.js";
 
 export const ALL_MARKETS: Market[] = ["cn", "hk", "us"];
@@ -49,19 +49,39 @@ export async function tick(config: Config, deps: TickDeps = {}): Promise<TickOut
   }
 
   const prepared = await prepareCheck(config, { markets: open, requireFresh: true, now });
-  const { result } = prepared;
+  const full = prepared.result;
   const notifier = deps.notifier === undefined ? notifierFor(config) : deps.notifier;
 
-  // 买入信号先交给 AI 决策（执行 / 暂缓），决策写入信号，随提醒发送并保存在待确认记录中
-  if (config.ai?.reviewBuys && result.items.some((i) => i.evaluation?.signals.some((s) => s.action === "buy"))) {
+  // AI 暂缓中的档位：今天已经决策过的不再请 AI、不再提醒
+  const deferredOf = (i: CheckItem) => prepared.state.symbols[i.holding.symbol]?.deferred ?? {};
+  const today = (i: CheckItem) => localTime(marketOf(i.holding.symbol), now).date;
+  for (const item of full.items) {
+    for (const s of item.evaluation?.signals ?? []) {
+      const d = s.layer === "tier" ? deferredOf(item)[s.ruleId] : undefined;
+      if (d && d.date === today(item)) Object.assign(s, { quiet: true, review: d.review });
+    }
+  }
+
+  // 交易信号先交给 AI 决策（执行 / 减量 / 暂缓），决策写入信号，随提醒发送并保存在待确认记录中
+  if (config.ai?.review && full.items.some((i) => i.evaluation?.signals.some((s) => !s.quiet))) {
     let client: AIClient | null = null;
     try {
       client = deps.ai === undefined ? createAIClient(config.ai) : deps.ai;
     } catch (e) {
-      markReviewError(result, describeAIError(e));
+      markReviewError(full, describeAIError(e));
     }
-    if (client) await reviewBuys(client, result.items, AbortSignal.timeout(180_000));
+    if (client) await reviewSignals(client, full.items, AbortSignal.timeout(180_000));
   }
+
+  // 之前已暂缓、今天重新决策后仍然暂缓：不重复提醒（页面上可以看到最新决策）
+  for (const item of full.items) {
+    for (const s of item.evaluation?.signals ?? []) {
+      if (!s.quiet && s.layer === "tier" && s.review?.decision === "hold" && deferredOf(item)[s.ruleId]) s.quiet = true;
+    }
+  }
+
+  // 本次要提醒的信号（去掉 quiet 的）；状态保存使用完整结果
+  const result = notifyView(full);
   const shouldNotify = notifier && (result.signalCount > 0 || config.notify?.always);
 
   let notified = false;
@@ -83,7 +103,15 @@ export async function tick(config: Config, deps: TickDeps = {}): Promise<TickOut
 
 function markReviewError(result: CheckResult, error: string) {
   for (const i of result.items)
-    for (const s of i.evaluation?.signals ?? []) if (s.action === "buy") s.review = { decision: "error", reason: `AI 决策失败（${error}），按规则信号提醒，请自行判断`, by: "" };
+    for (const s of i.evaluation?.signals ?? []) if (!s.quiet) s.review = { decision: "error", reason: `AI 决策失败（${error}），按规则信号提醒，请自行判断`, by: "" };
+}
+
+/** 只保留需要提醒的信号 */
+function notifyView(result: CheckResult): CheckResult {
+  const items = result.items.map((i) =>
+    i.evaluation && i.evaluation.signals.some((s) => s.quiet) ? { ...i, evaluation: { ...i.evaluation, signals: i.evaluation.signals.filter((s) => !s.quiet) } } : i,
+  );
+  return { ...result, items, signalCount: items.reduce((n, i) => n + (i.evaluation?.signals.length ?? 0), 0) };
 }
 
 /** 渲染信号邮件；开启 ai.emailComment 时附带 AI 点评，点评失败不影响发送 */

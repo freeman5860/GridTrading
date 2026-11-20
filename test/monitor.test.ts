@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mergeAlerted } from "../src/check.js";
-import type { Evaluation } from "../src/core/types.js";
+import type { Signal } from "../src/core/types.js";
 import { startMonitor, type Monitor } from "../src/server/monitor.js";
 import type { TickOutcome } from "../src/scheduler.js";
 
@@ -67,14 +67,16 @@ describe("控制台内置监控", () => {
 });
 
 describe("待确认成交的信号", () => {
-  const ev = (positionAfter: number, qty: number) =>
-    ({ positionAfter, signals: [{ layer: "tier", action: "buy", quantity: qty, price: 1, amount: qty, ruleId: "x", reason: "" }] }) as unknown as Evaluation;
+  const sig = (ruleId: string, qty: number, extra: Partial<Signal> = {}): Signal => ({ layer: "tier", action: "buy", quantity: qty, price: 1, amount: qty, ruleId, reason: "", ...extra });
 
-  it("首次记录；未确认时追加并累计预计持仓", () => {
-    const first = mergeAlerted(undefined, ev(1100, 100), 1000, "t1");
+  it("首次记录；同一档位的新决策替换旧记录，预计持仓按建议数量计算", () => {
+    const first = mergeAlerted(undefined, [sig("down15", 100)], 1000, "t1");
     expect(first).toMatchObject({ at: "t1", positionAfter: 1100 });
-    const next = mergeAlerted(first, ev(1200, 200), 1000, "t2"); // 配置中的持仓仍是 1000
-    expect(next).toMatchObject({ at: "t1", positionAfter: 1300 });
-    expect(next.signals).toHaveLength(2);
+    const next = mergeAlerted(first, [sig("down25", 200, { review: { decision: "reduce", quantity: 100, reason: "", by: "" } })], 1000, "t2");
+    expect(next).toMatchObject({ at: "t1", positionAfter: 1200 });
+    const replaced = mergeAlerted(next, [sig("down15", 100, { quiet: true, review: { decision: "hold", reason: "r", by: "" } })], 1000, "t3");
+    expect(replaced.signals).toHaveLength(2);
+    expect(replaced.signals[0]).not.toHaveProperty("quiet");
+    expect(replaced.signals[0]!.review?.decision).toBe("hold");
   });
 });

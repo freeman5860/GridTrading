@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { access, writeFile } from "node:fs/promises";
 import { Command } from "commander";
+import { createRequire } from "node:module";
 import { prepareCheck } from "../check.js";
 import { ConfigError, DEFAULT_CONFIG, EXAMPLE_CONFIG, loadConfig, parseInterval } from "../config.js";
 import { MARKETS, normalizeSymbol } from "../core/symbol.js";
@@ -17,11 +18,14 @@ import { loadState, saveState } from "../state.js";
 import { formatCheck, formatItem, formatQuote } from "./format.js";
 import { startServer } from "../server/index.js";
 import { startMonitor } from "../server/monitor.js";
+import { calendarCoverage, dayStatus } from "../market/holidays.js";
+
+const VERSION = (createRequire(import.meta.url)("../../package.json") as { version: string }).version;
 
 const program = new Command()
   .name("gridbot")
   .description("网格交易监控助手：A 股 / 港股 / 美股，分档仓位管理 + 区间小网格")
-  .version("0.1.0")
+  .version(VERSION)
   .option("-c, --config <path>", "配置文件路径", process.env.GRIDBOT_CONFIG ?? DEFAULT_CONFIG);
 
 program
@@ -267,9 +271,11 @@ program
       const t = localTime(m, now);
       const open = isMarketOpen(m, now);
       const next = open ? "" : `，下次开盘 ${describeNextOpen([{ market: m, at: nextOpenSafe(m, now) }])}`;
-      console.log(`${MARKETS[m].name}：${open ? "交易中" : "休市"}（当地 ${t.date} ${t.hhmm}，交易时段 ${describeSessions(m)}${next}）`);
+      const day = dayStatus(m, t.date);
+      const note = day.closed ? `今日${day.closed}休市${day.provisional ? "（暂定）" : ""}，` : day.halfDay ? `今日${day.halfDay}半日市，` : "";
+      console.log(`${MARKETS[m].name}：${open ? "交易中" : "休市"}（当地 ${t.date} ${t.hhmm}，${note}交易时段 ${describeSessions(m)}${next}）`);
     }
-    console.log("注：未内置节假日日历，节假日会显示为交易时段；定时检查时会根据行情日期自动跳过休市日。");
+    console.log(`注：${calendarCoverage()}。`);
   });
 
 program

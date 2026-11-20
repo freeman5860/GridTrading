@@ -46,7 +46,7 @@ function renderMarkets(data) {
         "span",
         { class: `chip ${m.open ? "open" : ""}`, title: `交易时段 ${m.sessions}${m.nextOpen ? `\n下次开盘 ${m.nextOpen}` : ""}` },
         h("span", { class: "light" }),
-        `${m.name} ${m.open ? "交易中" : "休市"} · ${m.localTime}`,
+        `${m.name} ${m.open ? "交易中" : "休市"}${m.holiday ? `（${m.holiday}）` : ""} · ${m.localTime}`,
       ),
     ),
   );
@@ -208,9 +208,9 @@ function card(item, state) {
         h(
           "div",
           { class: "signals alerted" },
-          h("div", { class: "small alerted-head" }, `已于 ${new Date(alerted.at).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })} 提醒，等待确认成交`),
+          h("div", { class: "small alerted-head" }, alerted.signals.every((s) => s.review?.decision === "hold") ? "AI 暂缓中 · " : "", `已于 ${new Date(alerted.at).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })} 提醒，等待确认成交`),
           alerted.signals.map((s) => signalRow(s, quote)),
-          reviewBox(alerted.signals.find((s) => s.review)?.review),
+          reviewBox(alerted.signals, state?.deferred),
           h("div", { class: "small muted" }, `全部成交后预计持仓 ${holding.position} → ${alerted.positionAfter}`),
         ),
       );
@@ -250,15 +250,21 @@ function card(item, state) {
   return h("div", { class: `card ${signals.length || alerted ? "has-signal" : ""}` }, head, body, actions);
 }
 
-function reviewBox(r) {
+const decisionText = (r) => ({ execute: "建议执行", reduce: `建议减量为 ${r.quantity}`, hold: "建议暂缓", error: "决策失败" })[r.decision];
+
+/** AI 理由（同一标的的信号共用） */
+function reviewBox(signals, deferred) {
+  const r = signals.find((s) => s.review)?.review;
   if (!r) return null;
-  const label = { execute: "AI 建议执行", hold: "AI 建议暂缓", error: "AI 决策失败" }[r.decision];
+  const held = signals.some((s) => s.review?.decision === "hold" && deferred?.[s.ruleId]);
+  const worst = signals.some((s) => s.review?.decision === "hold") ? "hold" : signals.some((s) => s.review?.decision === "reduce") ? "reduce" : r.decision;
   return h(
     "div",
-    { class: `review ${r.decision}` },
-    h("b", {}, label),
+    { class: `review ${worst}` },
+    h("b", {}, r.decision === "error" ? "AI 决策失败" : "AI 理由"),
     r.by && h("span", { class: "small muted" }, `（${r.by}）`),
     h("div", { class: "small" }, r.reason),
+    held && h("div", { class: "small muted" }, `暂缓的档位不算已触发，每个交易日重新请 AI 决策一次（最近一次：${Object.values(deferred).map((d) => d.date).sort().at(-1)}），AI 建议执行时会再次提醒。`),
   );
 }
 
@@ -270,6 +276,7 @@ function signalRow(s, quote) {
     h("b", { class: "num" }, s.quantity),
     h("span", { class: "num" }, `@ ${num(s.price)} ≈ ${money(s.amount)} ${quote?.currency ?? ""}${s.amountCny !== undefined ? `（约 ¥${money(s.amountCny)}）` : ""}`),
     h("span", { class: "tag" }, s.layer === "tier" ? "分档" : "网格"),
+    s.review && s.review.decision !== "error" && h("span", { class: `ai-tag ${s.review.decision}` }, `AI ${decisionText(s.review)}`),
     h("span", { class: "why" }, s.reason),
   );
 }
@@ -292,13 +299,14 @@ function ladder(change, triggered) {
 /** 与 src/core/fill.ts 相同：估算成交后的可用资金和持仓成本（港股通按中间价折算人民币） */
 function estimateFill(holding, signals, position) {
   const unit = (s) => (s.fxRate ? s.price * s.fxRate : s.price);
+  const qtyOf = (s) => (s.review?.decision === "reduce" && s.review.quantity ? s.review.quantity : s.quantity);
   const buys = signals.filter((s) => s.action === "buy");
   const sells = signals.filter((s) => s.action === "sell");
   const avg = (list) => {
-    const qty = list.reduce((n, s) => n + s.quantity, 0);
-    return qty ? list.reduce((n, s) => n + unit(s) * s.quantity, 0) / qty : 0;
+    const qty = list.reduce((n, s) => n + qtyOf(s), 0);
+    return qty ? list.reduce((n, s) => n + unit(s) * qtyOf(s), 0) / qty : 0;
   };
-  const planned = holding.position + buys.reduce((n, s) => n + s.quantity, 0) - sells.reduce((n, s) => n + s.quantity, 0);
+  const planned = holding.position + buys.reduce((n, s) => n + qtyOf(s), 0) - sells.reduce((n, s) => n + qtyOf(s), 0);
   const after = position ?? planned;
   const net = after - holding.position;
   const bought = net > 0 ? net : 0;
@@ -317,7 +325,7 @@ function confirmExecuted(holding, ev, alerted) {
   const cny = holding.connect ? "（人民币）" : "";
   openDialog({
     title: "确认已成交",
-    text: "记录本次触发的档位（之后不再重复提醒），并更新配置中的持仓、可用资金和基准价。按信号参考价估算，部分成交或价格不同时请按券商显示修改。",
+    text: "记录本次触发的档位（之后不再重复提醒），并更新配置中的持仓、可用资金和基准价。按信号参考价和 AI 建议的数量估算，部分成交或价格不同时请按券商显示修改。",
     fields: [
       { name: "position", label: "成交后的持仓", value: est.position, step: "1", required: true },
       holding.cash !== undefined && { name: "cash", label: `成交后的可用资金${cny}`, value: est.cash, hint: "买入减少、卖出增加；可按券商显示的可用资金修改" },
@@ -357,7 +365,7 @@ function editHolding(holding) {
 function dismissAlerted(holding) {
   openDialog({
     title: "忽略已提醒的信号",
-    text: "表示这次没有按信号成交。持仓不变，这些档位仍算已触发（本轮不会再提醒）；如需重新开始，请用「重置档位」。",
+    text: "表示这次不按信号成交。持仓不变，这些档位算已触发（本轮不会再提醒，AI 暂缓的档位也不再每天重新决策）；如需重新开始，请用「重置档位」。",
     okText: "忽略",
     onOk: async () => {
       await api(`/api/holdings/${encodeURIComponent(holding.symbol)}/dismiss`, {});

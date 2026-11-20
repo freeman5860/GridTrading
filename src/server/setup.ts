@@ -160,7 +160,7 @@ export async function readSetup(configPath: string, env: NodeJS.ProcessEnv = pro
           model: str(ai.model),
           baseURL: str(ai.baseURL),
           emailComment: ai.emailComment === true,
-          reviewBuys: ai.reviewBuys !== false,
+          review: ai.review ?? ai.reviewBuys ?? true,
           apiKey: secretView(ai.apiKey, env),
           authToken: secretView(ai.authToken, env),
         }
@@ -378,8 +378,9 @@ export async function saveAI(configPath: string, body: Raw) {
       model: optStr(a.model),
       baseURL: optStr(a.baseURL),
       emailComment: a.emailComment === true ? true : undefined,
-      // 默认开启，只在关闭时写入
-      reviewBuys: a.reviewBuys === false ? false : undefined,
+      // 默认开启，只在关闭时写入（旧名称 reviewBuys 会被删除）
+      review: a.review === false ? false : undefined,
+      reviewBuys: undefined,
     };
     setValue(doc, doc.contents as YAMLMap, "ai", ai);
   });

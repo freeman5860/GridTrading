@@ -9,6 +9,9 @@ export interface FillEstimate {
   basePrice: number;
 }
 
+/** 实际建议成交的数量：AI 建议减量时用 AI 的数量 */
+export const effectiveQuantity = (s: Signal) => (s.review?.decision === "reduce" && s.review.quantity ? s.review.quantity : s.quantity);
+
 /** 每股金额，单位与 cash / basePrice 相同（港股通为人民币） */
 const unit = (s: Signal) => (s.fxRate ? s.price * s.fxRate : s.price);
 
@@ -20,10 +23,10 @@ export function estimateFill(holding: Pick<Holding, "position" | "cash" | "baseP
   const buys = signals.filter((s) => s.action === "buy");
   const sells = signals.filter((s) => s.action === "sell");
   const avg = (list: Signal[]) => {
-    const qty = list.reduce((n, s) => n + s.quantity, 0);
-    return qty ? list.reduce((n, s) => n + unit(s) * s.quantity, 0) / qty : 0;
+    const qty = list.reduce((n, s) => n + effectiveQuantity(s), 0);
+    return qty ? list.reduce((n, s) => n + unit(s) * effectiveQuantity(s), 0) / qty : 0;
   };
-  const planned = holding.position + buys.reduce((n, s) => n + s.quantity, 0) - sells.reduce((n, s) => n + s.quantity, 0);
+  const planned = holding.position + buys.reduce((n, s) => n + effectiveQuantity(s), 0) - sells.reduce((n, s) => n + effectiveQuantity(s), 0);
   const after = position ?? planned;
   const net = after - holding.position;
   const bought = net > 0 ? net : 0;

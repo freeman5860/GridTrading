@@ -81,14 +81,24 @@ export interface SymbolState {
   updatedAt?: string;
   /** 已提醒、但用户还没确认成交的信号（档位已标记为触发，之后不会再次产生，所以单独保存） */
   alerted?: AlertedSignals;
+  /** AI 暂缓的档位：不算已触发，每个交易日重新请 AI 决策一次，直到 AI 建议执行或用户确认 / 忽略 */
+  deferred?: Record<string, DeferredTier>;
 }
 
 export interface SignalReview {
-  /** execute 执行；hold 暂缓；error AI 决策失败 */
-  decision: "execute" | "hold" | "error";
+  /** execute 执行；reduce 减量执行；hold 暂缓；error AI 决策失败 */
+  decision: "execute" | "reduce" | "hold" | "error";
+  /** reduce 时建议的数量（整手，小于规则数量） */
+  quantity?: number;
   reason: string;
   /** 模型，如 "Gemini · gemini-4-hydrogen" */
   by: string;
+}
+
+export interface DeferredTier {
+  /** 最近一次 AI 决策的日期（市场当地日期） */
+  date: string;
+  review: SignalReview;
 }
 
 export interface AlertedSignals {
@@ -110,8 +120,10 @@ export interface Signal {
   amountCny?: number;
   /** 港股通：计算时的港元兑人民币中间价 */
   fxRate?: number;
-  /** 买入信号的 AI 决策（发送提醒前） */
+  /** AI 决策（发送提醒前） */
   review?: SignalReview;
+  /** AI 暂缓中、今天已经决策过：不重复提醒 */
+  quiet?: boolean;
   ruleId: string;
   reason: string;
 }

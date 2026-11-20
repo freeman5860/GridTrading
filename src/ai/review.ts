@@ -1,5 +1,5 @@
-// AI 决策：规则引擎产生买入信号后、发送提醒前，由 AI 判断"执行"还是"暂缓"。
-// AI 只做是否执行的判断，不改动数量和价格；数量始终以规则引擎为准。
+// AI 决策：规则引擎产生交易信号（买入、卖出）后、发送提醒前，由 AI 逐个判断"执行 / 减量 / 暂缓"。
+// AI 不能增加数量、不能改价格；减量只能按整手减少。暂缓的档位之后每个交易日重新决策一次。
 // 判断依据：网格规则（含适用条件）、引擎计算结果、近 60 个交易日的日 K 走势。
 
 import { z } from "zod";
@@ -76,42 +76,58 @@ export function describeHistory(bars: Bar[]): string {
 
 // ---------------- 决策 ----------------
 
+const decisionSchema = z.preprocess(
+  (v) =>
+    typeof v === "string"
+      ? (({ 执行: "execute", 减量: "reduce", 暂缓: "hold", buy: "execute", sell: "execute", wait: "hold" }) as Record<string, string>)[v.trim()] ?? v.trim().toLowerCase()
+      : v,
+  z.enum(["execute", "reduce", "hold"]),
+);
+
 const reviewSchema = z.object({
-  decision: z.preprocess(
-    (v) => (typeof v === "string" ? ({ 执行: "execute", 暂缓: "hold", buy: "execute", wait: "hold" } as Record<string, string>)[v.trim()] ?? v.trim().toLowerCase() : v),
-    z.enum(["execute", "hold"]),
-  ),
+  signals: z.array(z.object({ id: z.coerce.number(), decision: decisionSchema, quantity: z.coerce.number().optional().nullable() })).optional(),
+  /** 兼容只给出一个总体决策的回答 */
+  decision: decisionSchema.optional(),
   reason: z.string().min(1),
 });
 
 async function reviewSystemPrompt(): Promise<string> {
-  return `你是网格交易的买入决策助手。规则引擎已按下面的《网格交易规则》算出买入信号（数量、价格已确定），你要决定这次买入是"执行"还是"暂缓"。
+  return `你是网格交易的决策助手。规则引擎已按下面的《网格交易规则》算出交易信号（方向、数量、价格），你要逐个信号决定：执行（execute）、减量执行（reduce）、还是暂缓（hold）。
 
 <grid_rules>
 ${await loadRulesText()}
 </grid_rules>
 
 判断要点：
-1. 对照规则的"适用条件"：近期是否为单边下跌（如连续下跌、均线空头排列、跌破前低且没有企稳迹象），单边下跌中网格失效、应暂缓；
-2. 跌破 −25% 时规则要求先复核基本面 / 投资逻辑，你无法确认时应倾向暂缓并说明需要用户核实什么；
-3. 资金是否充足、加仓后仓位是否过重；
-4. 不要改动数量和价格，不要编造新闻或基本面数据，只根据给出的数据判断。
+1. 对照规则的"适用条件"：单边行情中网格失效。
+   - 买入：近期是否单边下跌（连续下跌、均线空头排列、跌破前低且没有企稳迹象）。明显单边下跌时暂缓，下跌放缓但未企稳时可减量。
+   - 卖出：是否处于强势单边上涨（连续上涨、均线多头排列、放量突破），强势时可减量以免过早卖飞；趋势转弱、或 +100% 清仓档，应执行。
+2. 跌破 −25% 时规则要求先复核基本面 / 投资逻辑，你无法确认时倾向暂缓，并说明需要用户核实什么。
+3. 资金是否充足、加仓后仓位是否过重。
+4. 减量时 quantity 必须是每手股数的整数倍，且小于规则数量；不能增加数量，不能改价格。
+5. 不要编造新闻或基本面数据，只根据给出的数据判断。被暂缓的信号会在之后每个交易日重新请你决策一次。
 
 只输出一个 JSON 对象，不要输出其他文字：
-{"decision": "execute" 或 "hold", "reason": "中文，80 字以内，说明主要依据和需要注意的风险"}`;
+{"signals": [{"id": 信号编号, "decision": "execute" | "reduce" | "hold", "quantity": 减量后的数量（仅 reduce 时填写）}], "reason": "中文，100 字以内，说明主要依据和需要注意的风险"}`;
 }
 
-/** 对每个有买入信号的标的调用一次 AI，把决策写入该标的的买入信号 */
-export async function reviewBuys(client: AIClient, items: CheckItem[], signal?: AbortSignal): Promise<void> {
+const actionText = (a: string) => (a === "buy" ? "买入" : "卖出");
+
+/**
+ * 对每个有待决策信号的标的调用一次 AI，把决策写入对应信号（signal.review）。
+ * 跳过 quiet 的信号（今天已决策过、仍在暂缓中）。
+ */
+export async function reviewSignals(client: AIClient, items: CheckItem[], signal?: AbortSignal): Promise<void> {
   const by = `${PROVIDER_INFO[client.provider].name} · ${client.model}`;
-  const targets = items.filter((i) => i.evaluation?.signals.some((s) => s.action === "buy"));
+  const targets = items.filter((i) => i.evaluation?.signals.some((s) => !s.quiet));
   if (!targets.length) return;
   const system = await reviewSystemPrompt();
 
   await Promise.all(
     targets.map(async (item) => {
       const ev = item.evaluation!;
-      let review: SignalReview;
+      const pending = ev.signals.filter((s) => !s.quiet);
+      const lot = item.quote?.lotSize && item.quote.lotSize > 0 ? item.quote.lotSize : 1;
       try {
         let history = "（获取历史行情失败）";
         try {
@@ -120,20 +136,43 @@ export async function reviewBuys(client: AIClient, items: CheckItem[], signal?: 
           /* 没有历史行情也继续决策 */
         }
         const holding = { ...item.holding, name: item.quote?.name ?? item.holding.name };
+        const list = pending
+          .map((s, i) => `${i + 1}. ${actionText(s.action)} ${s.quantity} @ ${s.price}（${s.layer === "tier" ? "分档" : "网格"}：${s.reason}）`)
+          .join("\n");
         const raw = await complete(client, {
           system,
-          prompt: `<engine_result>\n${describeEvaluation(holding, item.quote, ev)}\n</engine_result>\n\n<history>\n${history}\n</history>`,
+          prompt:
+            `<engine_result>\n${describeEvaluation(holding, item.quote, ev)}\n</engine_result>\n\n` +
+            `<signals lot="${lot}">\n${list}\n</signals>\n\n<history>\n${history}\n</history>`,
           effort: "medium",
           json: true,
           signal,
         });
         const parsed = reviewSchema.safeParse(parseJsonObject(raw));
         if (!parsed.success) throw new Error("AI 返回的决策格式不正确");
-        review = { ...parsed.data, by };
+        const { reason } = parsed.data;
+        pending.forEach((s, i) => {
+          const d = parsed.data.signals?.find((x) => x.id === i + 1) ?? (parsed.data.decision ? { decision: parsed.data.decision, quantity: undefined } : undefined);
+          if (!d) {
+            s.review = { decision: "error", reason: "AI 没有给出这个信号的决策，按规则信号提醒，请自行判断", by };
+            return;
+          }
+          s.review = normalizeDecision(d.decision, d.quantity ?? undefined, s.quantity, lot, reason, by);
+        });
       } catch (e) {
-        review = { decision: "error", reason: `AI 决策失败（${describeAIError(e)}），按规则信号提醒，请自行判断`, by };
+        for (const s of pending) s.review = { decision: "error", reason: `AI 决策失败（${describeAIError(e)}），按规则信号提醒，请自行判断`, by };
       }
-      for (const s of ev.signals) if (s.action === "buy") s.review = review;
     }),
   );
 }
+
+/** 校正减量数量：按整手向下取整；不小于规则数量视为执行，为 0 视为暂缓 */
+export function normalizeDecision(decision: "execute" | "reduce" | "hold", quantity: number | undefined, ruleQty: number, lot: number, reason: string, by: string): SignalReview {
+  if (decision !== "reduce") return { decision, reason, by };
+  const q = quantity && quantity > 0 ? Math.floor(quantity / lot) * lot : 0;
+  if (q >= ruleQty) return { decision: "execute", reason, by };
+  if (q <= 0) return { decision: "hold", reason, by };
+  return { decision: "reduce", quantity: q, reason, by };
+}
+
+export { effectiveQuantity } from "../core/fill.js";

@@ -1,6 +1,6 @@
 {
   "name": "gridbot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "开源网格交易监控助手：A 股 / 港股 / 美股行情监控、分档仓位管理与区间网格信号、多模型 AI 分析、邮件提醒",
   "type": "module",
   "license": "MIT",

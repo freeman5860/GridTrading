@@ -135,6 +135,9 @@ footer { padding: 8px 0 24px; }
 .review.execute b { color: var(--down); }
 .review.hold { border-left-color: var(--warn); }
 .review.hold b { color: var(--warn); }
+.review.reduce { border-left-color: var(--warn); }
+.ai-tag { font-size: 12px; font-weight: 600; padding: 0 6px; border-radius: 4px; background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+.ai-tag.execute { background: color-mix(in srgb, var(--down) 15%, transparent); color: var(--down); }
 .signals.alerted { border-left: 3px solid var(--up); padding-left: 10px; }
 .alerted-head { color: var(--up); font-weight: 600; }
 .signals { display: flex; flex-direction: column; gap: 6px; }

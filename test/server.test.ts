@@ -172,6 +172,30 @@ describe("接口", () => {
     expect(await readFile(configPath, "utf8")).toContain("position: 10000");
   });
 
+  it("AI 暂缓中的档位：页面不作为新信号重复显示，确认成交后结束暂缓", async () => {
+    const hold = { decision: "hold", reason: "单边下跌", by: "m" };
+    const { saveState } = await import("../src/state.js");
+    await saveState(path.join(dir, ".gridbot/state.json"), {
+      version: 1,
+      symbols: {
+        sh510300: {
+          basePrice: 4, triggered: [],
+          deferred: { down15: { date: "2026-11-17", review: hold } },
+          alerted: { at: "2026-11-17T02:00:00Z", positionAfter: 11000, signals: [{ layer: "tier", action: "buy", quantity: 1000, price: 3.4, amount: 3400, ruleId: "down15", reason: "", review: hold }] },
+        },
+      },
+    } as never);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data: any = await (await fetch(base + "/api/status")).json();
+    expect(data.check.signalCount).toBe(0);
+    expect(data.state.sh510300.deferred.down15.review.decision).toBe("hold");
+
+    expect(await (await post("/api/holdings/sh510300/execute", {})).json()).toMatchObject({ position: 11000 });
+    const state = JSON.parse(await readFile(path.join(dir, ".gridbot/state.json"), "utf8"));
+    expect(state.symbols.sh510300.triggered).toEqual(["down15"]);
+    expect(state.symbols.sh510300.deferred).toBeUndefined();
+  });
+
   it("没有开启监控时状态中说明", async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const data: any = await (await fetch(base + "/api/status")).json();

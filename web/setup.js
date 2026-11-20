@@ -592,7 +592,7 @@ function renderAI() {
       model: same ? saved.model : undefined,
       baseURL: same ? saved.baseURL : undefined,
       emailComment: same ? saved.emailComment : (st.emailComment ?? false),
-      reviewBuys: same ? saved.reviewBuys !== false : (st.reviewBuys ?? true),
+      review: same ? saved.review !== false : (st.review ?? true),
       apiKey: undefined,
       authToken: undefined,
       keyView: same ? saved.apiKey : undefined,
@@ -609,13 +609,13 @@ function renderAI() {
     "div",
     { class: "panel" },
     h("h2", { class: "h2" }, "第 3 步：AI 分析（可选）"),
-    h("p", { class: "muted small" }, "AI 用来对买入信号做决策（结合近 60 个交易日走势判断执行还是暂缓）、识别持仓截图、解读信号。买卖数量始终由规则引擎计算，AI 不改动。"),
+    h("p", { class: "muted small" }, "AI 用来对买卖信号做决策（结合近 60 个交易日走势判断执行、减量还是暂缓）、识别持仓截图、解读信号。买卖数量始终由规则引擎计算，AI 不改动。"),
     box,
     stepFooter({
       save: () =>
         api("/api/setup/ai", {
           ai: st.provider
-            ? { provider: st.provider, apiKey: st.apiKey, authToken: st.authToken, model: st.model, baseURL: st.baseURL, emailComment: st.emailComment, reviewBuys: st.reviewBuys }
+            ? { provider: st.provider, apiKey: st.apiKey, authToken: st.authToken, model: st.model, baseURL: st.baseURL, emailComment: st.emailComment, review: st.review }
             : null,
         }),
       back: "notify",
@@ -685,7 +685,7 @@ function aiFields(st, loadFields, redraw) {
     h(
       "div",
       { class: "checks" },
-      checkbox(st, "reviewBuys", "买入信号先由 AI 决策（执行 / 暂缓），结论随提醒发送"),
+      checkbox(st, "review", "交易信号先由 AI 决策（执行 / 减量 / 暂缓），结论随提醒发送；暂缓的档位每个交易日重新决策"),
       checkbox(st, "emailComment", "提醒中附带 AI 点评（每次提醒调用一次 AI，可能产生费用）"),
     ),
   ];

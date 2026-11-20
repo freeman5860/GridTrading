@@ -112,28 +112,34 @@ describe("港股通配置与检查", () => {
     expect(result.items[0]!.error).toContain("获取汇率失败");
   });
 
-  it("定时检查：内地休市日跳过港股通标的", async () => {
+  it("定时检查：内地休市日跳过港股通标的（日历覆盖的年份查日历，其他年份用上证指数行情判断）", async () => {
     vi.spyOn(fxSource, "fetchHkdCny").mockResolvedValue(fx);
-    const now = new Date("2026-11-17T02:00:00Z"); // 北京 / 香港 10:00
-    const quotes = vi.spyOn(tencentSource, "fetchQuotes").mockResolvedValue(
+    // 2026-10-02（周五）：香港开市、内地国庆休市
+    const holiday = new Date("2026-10-02T02:00:00Z");
+    const quotes = vi.spyOn(tencentSource, "fetchQuotes").mockResolvedValue(new Map([["hk00700", q("hk00700", "hk", "2026-10-02 10:00:00")]]));
+    const closed = await prepareCheck(await cfg(), { requireFresh: true, now: holiday });
+    expect(quotes.mock.calls[0]![0]).not.toContain("sh000001");
+    expect(closed.result.items[0]!.skipped).toBe("内地国庆节，港股通不开放交易");
+
+    // 2028 年不在日历中：上证指数停在昨天 → 内地休市
+    const now = new Date("2028-03-15T02:00:00Z");
+    quotes.mockResolvedValue(
       new Map([
-        ["hk00700", q("hk00700", "hk", "2026-11-17 10:00:00")],
-        ["sh000001", q("sh000001", "cn", "2026-11-16 15:00:00", 3300)], // 上证指数停在昨天：内地休市
+        ["hk00700", q("hk00700", "hk", "2028-03-15 10:00:00")],
+        ["sh000001", q("sh000001", "cn", "2028-03-14 15:00:00", 3300)],
       ]),
     );
-    const closed = await prepareCheck(await cfg(), { requireFresh: true, now });
-    expect(quotes.mock.calls[0]![0]).toContain("sh000001");
-    expect(closed.result.items[0]!.skipped).toContain("港股通不开放");
-    expect(closed.result.signalCount).toBe(0);
+    const probed = await prepareCheck(await cfg(), { requireFresh: true, now });
+    expect(quotes.mock.calls.at(-1)![0]).toContain("sh000001");
+    expect(probed.result.items[0]!.skipped).toContain("港股通不开放");
 
     quotes.mockResolvedValue(
       new Map([
-        ["hk00700", q("hk00700", "hk", "2026-11-17 10:00:00")],
-        ["sh000001", q("sh000001", "cn", "2026-11-17 10:00:00", 3300)],
+        ["hk00700", q("hk00700", "hk", "2028-03-15 10:00:00")],
+        ["sh000001", q("sh000001", "cn", "2028-03-15 10:00:00", 3300)],
       ]),
     );
-    const open = await prepareCheck(await cfg(), { requireFresh: true, now });
-    expect(open.result.signalCount).toBe(1);
+    expect((await prepareCheck(await cfg(), { requireFresh: true, now })).result.signalCount).toBe(1);
 
     // 普通港股不检查内地是否开市
     quotes.mockClear();

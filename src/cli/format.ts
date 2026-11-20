@@ -3,6 +3,7 @@ import type { CheckItem, CheckResult } from "../check.js";
 import { formatPct } from "../core/engine.js";
 import { MARKETS } from "../core/symbol.js";
 import type { Evaluation, Quote, Signal } from "../core/types.js";
+import { decisionText } from "../notify/render.js";
 
 const color = process.stdout.isTTY && !process.env.NO_COLOR;
 type Style = Parameters<typeof styleText>[0];
@@ -50,12 +51,13 @@ export function formatItem(item: CheckItem): string {
   );
 
   if (ev.signals.length) {
-    for (const sig of ev.signals) lines.push(signalLine(sig, cur));
-    const review = ev.signals.find((x) => x.review)?.review;
-    if (review) {
-      const label = { execute: s("green", "建议执行"), hold: s("yellow", "建议暂缓"), error: s("gray", "决策失败") }[review.decision];
-      lines.push(`  AI 决策：${label}${review.by ? s("gray", `（${review.by}）`) : ""} ${review.reason}`);
+    for (const sig of ev.signals) {
+      const r = sig.review;
+      const tag = r && r.decision !== "error" ? " " + s(r.decision === "execute" ? "green" : "yellow", `→ AI ${decisionText(r)}`) : "";
+      lines.push(signalLine(sig, cur) + tag);
     }
+    const review = ev.signals.find((x) => x.review)?.review;
+    if (review) lines.push(`  ${review.decision === "error" ? s("gray", "AI 决策失败") : "AI 理由"}${review.by ? s("gray", `（${review.by}）`) : ""}：${review.reason}`);
     lines.push(s("gray", `  执行后预计持仓：${holding.position} → ${ev.positionAfter}（交易后请更新配置中的 position）`));
   } else {
     lines.push(s("gray", "  不操作"));
